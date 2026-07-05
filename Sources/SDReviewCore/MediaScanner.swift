@@ -119,7 +119,7 @@ public final class MediaScanner {
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else {
             return []
         }
