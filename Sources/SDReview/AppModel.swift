@@ -83,6 +83,21 @@ final class AppModel: ObservableObject {
         return exporter.estimateBytes(document: document)
     }
 
+    var warningSummary: String? {
+        guard let document else { return nil }
+        var parts: [String] = []
+        if !document.rawFiles.isEmpty {
+            parts.append("\(document.rawFiles.count) RAW")
+        }
+        if !document.heifFiles.isEmpty {
+            parts.append("\(document.heifFiles.count) HEIF unsupported")
+        }
+        if !document.problems.isEmpty {
+            parts.append("\(document.problems.count) problems")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " - ")
+    }
+
     func refreshSources() {
         detectedSources = scanner.mountedDCIMVolumes()
     }
@@ -106,7 +121,7 @@ final class AppModel: ObservableObject {
         isScanning = true
         errorMessage = nil
         exportMessage = nil
-        let range = DateRange(start: startDate, end: endDate)
+        let range = scanDateRange()
 
         Task {
             do {
@@ -115,7 +130,7 @@ final class AppModel: ObservableObject {
                 }.value
 
                 let loaded = try sessionStore.load(sourceRoot: result.sourceRoot, dateRange: range)
-                let document = loaded ?? SessionDocument(
+                let freshDocument = SessionDocument(
                     sourceRoot: result.sourceRoot,
                     dateRange: range,
                     items: result.items,
@@ -123,6 +138,7 @@ final class AppModel: ObservableObject {
                     heifFiles: result.heifFiles,
                     problems: result.problems
                 )
+                let document = loaded.map { merge(fresh: freshDocument, loaded: $0) } ?? freshDocument
                 reviewSession = ReviewSession(document: document)
                 revision += 1
                 configurePlayerForCurrentItem(autoplay: true)
@@ -293,6 +309,7 @@ final class AppModel: ObservableObject {
     }
 
     func markIn() {
+        guard currentItem?.kind == .video else { return }
         let now = currentPlaybackSeconds
         if let selectedSegmentID {
             reviewSession?.replaceSegment(segmentID: selectedSegmentID, start: now)
@@ -303,6 +320,7 @@ final class AppModel: ObservableObject {
     }
 
     func markOut() {
+        guard currentItem?.kind == .video else { return }
         let now = currentPlaybackSeconds
         if let selectedSegmentID {
             reviewSession?.replaceSegment(segmentID: selectedSegmentID, end: now)
@@ -313,6 +331,7 @@ final class AppModel: ObservableObject {
     }
 
     func bankPendingSegment() {
+        guard currentItem?.kind == .video else { return }
         guard let pendingIn, let pendingOut else { return }
         reviewSession?.addSegment(start: pendingIn, end: pendingOut)
         self.pendingIn = nil
@@ -514,6 +533,43 @@ final class AppModel: ObservableObject {
         if autoplay {
             nextPlayer.playImmediately(atRate: playbackRate)
         }
+    }
+
+    private func scanDateRange() -> DateRange {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: startDate)
+        let endDay = calendar.startOfDay(for: endDate)
+        let end = calendar.date(byAdding: DateComponents(day: 1, second: -1), to: endDay) ?? endDate
+        return DateRange(start: start, end: end)
+    }
+
+    private func merge(fresh: SessionDocument, loaded: SessionDocument) -> SessionDocument {
+        let loadedByID = Dictionary(uniqueKeysWithValues: loaded.items.map { ($0.id, $0) })
+        var mergedItems = fresh.items
+        for index in mergedItems.indices {
+            if let prior = loadedByID[mergedItems[index].id] {
+                mergedItems[index].decision = prior.decision
+                mergedItems[index].crop = prior.crop
+                mergedItems[index].segments = prior.segments
+            }
+        }
+
+        let freshIDs = Set(fresh.items.map(\.id))
+        let loadedIDs = Set(loaded.items.map(\.id))
+        let keepUndo = freshIDs == loadedIDs
+        return SessionDocument(
+            toolVersion: fresh.toolVersion,
+            sourceRoot: fresh.sourceRoot,
+            dateRange: fresh.dateRange,
+            lastItemID: freshIDs.contains(loaded.lastItemID ?? "") ? loaded.lastItemID : fresh.items.first?.id,
+            filter: loaded.filter,
+            items: mergedItems,
+            rawFiles: fresh.rawFiles,
+            heifFiles: fresh.heifFiles,
+            problems: fresh.problems,
+            undoStack: keepUndo ? loaded.undoStack : [],
+            redoStack: keepUndo ? loaded.redoStack : []
+        )
     }
 
     private static func defaultFixtureURL() -> URL? {

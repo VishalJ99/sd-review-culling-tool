@@ -31,16 +31,21 @@ public final class MediaScanner {
         for fileURL in fileURLs {
             let relativePath = relativePath(for: fileURL, root: root)
             let ext = fileURL.pathExtension.lowercased()
+            let resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .creationDateKey])
+            let fallbackDate = resourceValues.contentModificationDate ?? resourceValues.creationDate ?? .distantPast
             if ext == "raf" {
-                rawFiles.append(relativePath)
+                if dateRange?.contains(fallbackDate) ?? true {
+                    rawFiles.append(relativePath)
+                }
                 continue
             }
             if ext == "heif" || ext == "heic" {
-                heifFiles.append(relativePath)
+                if dateRange?.contains(fallbackDate) ?? true {
+                    heifFiles.append(relativePath)
+                }
                 continue
             }
 
-            let resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .creationDateKey])
             let fileSize = Int64(resourceValues.fileSize ?? 0)
             let metadataDate: Date?
             let kind: MediaKind
@@ -55,7 +60,6 @@ public final class MediaScanner {
                 continue
             }
 
-            let fallbackDate = resourceValues.contentModificationDate ?? resourceValues.creationDate ?? .distantPast
             let captureDate = metadataDate ?? fallbackDate
             if let dateRange, !dateRange.contains(captureDate) {
                 continue

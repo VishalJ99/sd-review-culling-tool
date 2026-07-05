@@ -26,6 +26,7 @@ public struct ExportedManifestItem: Codable, Equatable, Sendable {
     public var segments: [VideoSegment]
     public var cutMode: String?
     public var outputFilenames: [String]
+    public var failure: String?
 }
 
 public struct ExportManifest: Codable, Equatable, Sendable {
@@ -45,6 +46,8 @@ public enum ExportError: Error, LocalizedError {
     case zeroKeepers
     case cannotReadImage(URL)
     case cannotCreateDestination(URL)
+    case unsafeDestination(URL)
+    case insufficientSpace(required: Int64, available: Int64)
     case videoExporterUnavailable(URL)
     case videoExportFailed(URL, String)
 
@@ -53,6 +56,8 @@ public enum ExportError: Error, LocalizedError {
         case .zeroKeepers: "No kept items to export."
         case .cannotReadImage(let url): "Cannot read image: \(url.path)"
         case .cannotCreateDestination(let url): "Cannot create destination: \(url.path)"
+        case .unsafeDestination(let url): "Export destination would write to the source media volume or source tree: \(url.path)"
+        case .insufficientSpace(let required, let available): "Not enough free space. Required \(ByteCountFormatter.string(fromByteCount: required, countStyle: .file)); available \(ByteCountFormatter.string(fromByteCount: available, countStyle: .file))."
         case .videoExporterUnavailable(let url): "Cannot create passthrough exporter for \(url.lastPathComponent)."
         case .videoExportFailed(let url, let message): "Video export failed for \(url.lastPathComponent): \(message)"
         }
@@ -79,6 +84,8 @@ public final class MediaExporter {
     public func export(document: SessionDocument, options: ExportOptions) async throws -> ExportReport {
         let keptItems = document.items.filter { $0.isKeptForExport }
         guard !keptItems.isEmpty else { throw ExportError.zeroKeepers }
+        try validateDestination(options.destination, document: document)
+        try validateFreeSpace(options.destination, requiredBytes: estimateBytes(document: document))
 
         try FileManager.default.createDirectory(at: options.destination, withIntermediateDirectories: true)
         if !options.flatMediaFolder {
@@ -88,29 +95,34 @@ public final class MediaExporter {
             try FileManager.default.createDirectory(at: options.destination.appendingPathComponent("media"), withIntermediateDirectories: true)
         }
 
-        var manifestItems: [ExportedManifestItem] = []
+        var outputMap: [String: [String]] = [:]
+        var failureMap: [String: String] = [:]
         var failures: [String] = []
         var usedNames: Set<String> = []
 
         for item in keptItems {
             do {
                 let outputs = try await export(item: item, options: options, usedNames: &usedNames)
-                let hash = (try? sha256File(item.fileURL)) ?? ""
-                manifestItems.append(
-                    ExportedManifestItem(
-                        sourceRelativePath: item.relativePath,
-                        fileSize: item.fileSize,
-                        sha256: hash,
-                        decision: item.decision,
-                        crop: item.crop,
-                        segments: item.segments,
-                        cutMode: item.kind == .video && !item.segments.isEmpty ? "passthrough-with-handles" : nil,
-                        outputFilenames: outputs.map { $0.lastPathComponent }
-                    )
-                )
+                outputMap[item.id] = outputs.map { $0.lastPathComponent }
             } catch {
-                failures.append("\(item.relativePath): \(error.localizedDescription)")
+                let failure = "\(item.relativePath): \(error.localizedDescription)"
+                failures.append(failure)
+                failureMap[item.id] = error.localizedDescription
             }
+        }
+
+        let manifestItems = document.items.map { item in
+            ExportedManifestItem(
+                sourceRelativePath: item.relativePath,
+                fileSize: item.fileSize,
+                sha256: (try? sha256File(item.fileURL)) ?? "",
+                decision: item.decision,
+                crop: item.crop,
+                segments: item.segments,
+                cutMode: item.kind == .video && !item.segments.isEmpty ? "passthrough-with-handles" : nil,
+                outputFilenames: outputMap[item.id] ?? [],
+                failure: failureMap[item.id]
+            )
         }
 
         let manifest = ExportManifest(
@@ -148,12 +160,6 @@ public final class MediaExporter {
             for (index, segment) in item.segments.sorted(by: { $0.startSeconds < $1.startSeconds }).enumerated() {
                 let name = uniqueName(baseName(for: item, clipIndex: index + 1, suffix: "mov"), usedNames: &usedNames)
                 let target = folder(for: item, options: options).appendingPathComponent(name)
-                if FileManager.default.fileExists(atPath: target.path),
-                   let size = try? target.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                   size > 0 {
-                    outputs.append(target)
-                    continue
-                }
                 try await exportVideoSegment(
                     source: item.fileURL,
                     destination: target,
@@ -219,8 +225,19 @@ public final class MediaExporter {
 
     private func exportCroppedPhoto(item: MediaItem, destination: URL) throws {
         guard let crop = item.crop,
-              let source = CGImageSourceCreateWithURL(item.fileURL as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+              let source = CGImageSourceCreateWithURL(item.fileURL as CFURL, nil) else {
+            throw ExportError.cannotReadImage(item.fileURL)
+        }
+        let properties = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        let pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int ?? 0
+        let pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int ?? 0
+        let maxPixelSize = max(pixelWidth, pixelHeight)
+        let transformOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, transformOptions as CFDictionary) else {
             throw ExportError.cannotReadImage(item.fileURL)
         }
         let cropRect = CGRect(
@@ -242,7 +259,7 @@ public final class MediaExporter {
             throw ExportError.cannotCreateDestination(destination)
         }
 
-        var metadata = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        var metadata = properties
         metadata[kCGImagePropertyOrientation] = 1
         let options: [CFString: Any] = [
             kCGImageDestinationLossyCompressionQuality: 0.92,
@@ -305,5 +322,43 @@ public final class MediaExporter {
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(manifest)
         try data.write(to: url, options: [.atomic])
+    }
+
+    private func validateDestination(_ destination: URL, document: SessionDocument) throws {
+        let destinationURL = destination.standardizedFileURL
+        let sourceURL = URL(fileURLWithPath: document.sourceRoot).standardizedFileURL
+        let destinationPath = destinationURL.path
+        let sourcePath = sourceURL.path
+        if destinationPath == sourcePath || destinationPath.hasPrefix(sourcePath + "/") {
+            throw ExportError.unsafeDestination(destinationURL)
+        }
+
+        if sourcePath.hasPrefix("/Volumes/"),
+           let sourceVolume = try? sourceURL.resourceValues(forKeys: [.volumeURLKey]).volume,
+           let destinationVolume = try? nearestExistingParent(for: destinationURL).resourceValues(forKeys: [.volumeURLKey]).volume,
+           sourceVolume.standardizedFileURL == destinationVolume.standardizedFileURL {
+            throw ExportError.unsafeDestination(destinationURL)
+        }
+    }
+
+    private func validateFreeSpace(_ destination: URL, requiredBytes: Int64) throws {
+        let parent = nearestExistingParent(for: destination)
+        let values = try parent.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        let available = values.volumeAvailableCapacityForImportantUsage ?? Int64(values.volumeAvailableCapacity ?? 0)
+        if available > 0 && available < requiredBytes {
+            throw ExportError.insufficientSpace(required: requiredBytes, available: available)
+        }
+    }
+
+    private func nearestExistingParent(for url: URL) -> URL {
+        var candidate = url.standardizedFileURL
+        while !FileManager.default.fileExists(atPath: candidate.path) {
+            let parent = candidate.deletingLastPathComponent()
+            if parent.path == candidate.path {
+                break
+            }
+            candidate = parent
+        }
+        return candidate
     }
 }

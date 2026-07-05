@@ -50,8 +50,20 @@ final class FixtureSmokeTests: XCTestCase {
             document: document,
             options: ExportOptions(destination: destination, flatMediaFolder: false)
         )
+        try """
+        SD Review smoke export
+
+        Recreate:
+        SDREVIEW_FIXTURE=\"\(fixture)\" swift test --filter FixtureSmokeTests
+
+        Expected result:
+        - manifest.json exists
+        - manifest failures array is empty
+        - at least one copied real camera output exists
+        """.write(to: destination.appendingPathComponent("reproduction.txt"), atomically: true, encoding: .utf8)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: destination.appendingPathComponent("manifest.json").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.appendingPathComponent("reproduction.txt").path))
         XCTAssertGreaterThan(report.manifest.items.flatMap(\.outputFilenames).count, 0)
         XCTAssertTrue(report.manifest.failures.isEmpty, report.manifest.failures.joined(separator: "\n"))
     }

@@ -96,6 +96,7 @@ public final class ReviewSession {
         guard let id = currentItemID else { return }
         perform {
             updateItem(id: id) { item in
+                guard item.kind == .video else { return }
                 item.segments.append(VideoSegment(startSeconds: start, endSeconds: end))
                 item.segments.sort { $0.startSeconds < $1.startSeconds }
                 item.decision = .keep
@@ -107,6 +108,7 @@ public final class ReviewSession {
         guard let id = currentItemID else { return }
         perform {
             updateItem(id: id) { item in
+                guard item.kind == .video else { return }
                 guard let index = item.segments.firstIndex(where: { $0.id == segmentID }) else { return }
                 let existing = item.segments[index]
                 item.segments[index] = VideoSegment(
@@ -124,6 +126,7 @@ public final class ReviewSession {
         guard let id = currentItemID else { return }
         perform {
             updateItem(id: id) { item in
+                guard item.kind == .video else { return }
                 item.segments.removeAll { $0.id == segmentID }
             }
         }
@@ -146,11 +149,32 @@ public final class ReviewSession {
               let item = document.items.first(where: { $0.id == id }) else { return }
         let wasUndecided = item.decision == .undecided
         let nextDecision: ReviewDecision = item.decision == decision ? .undecided : decision
+        let oldFiltered = filteredItems
+        let oldIndex = oldFiltered.firstIndex(where: { $0.id == id })
+        let autoAdvanceTarget = oldIndex.flatMap { index -> String? in
+            let nextIndex = index + 1
+            if nextIndex < oldFiltered.count {
+                return oldFiltered[nextIndex].id
+            }
+            let previousIndex = index - 1
+            if previousIndex >= 0 {
+                return oldFiltered[previousIndex].id
+            }
+            return nil
+        }
 
         perform {
             updateItem(id: id) { $0.decision = nextDecision }
             if wasUndecided {
-                move(delta: 1)
+                currentItemID = autoAdvanceTarget
+                if let currentItemID,
+                   !filteredItems.contains(where: { $0.id == currentItemID }) {
+                    self.currentItemID = filteredItems.first?.id
+                }
+                document.lastItemID = currentItemID
+            } else if !document.filter.includes(nextDecision) {
+                currentItemID = filteredItems.first?.id
+                document.lastItemID = currentItemID
             }
         }
     }

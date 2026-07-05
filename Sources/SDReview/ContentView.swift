@@ -132,6 +132,10 @@ private struct StatusBar: View {
                 Text(item.filename)
                     .font(.system(.body, design: .monospaced))
             }
+            if let warning = model.warningSummary {
+                Text(warning)
+                    .foregroundStyle(.orange)
+            }
             Spacer()
             Text("\(session?.undecidedCount ?? 0) undecided")
                 .foregroundStyle(.secondary)
