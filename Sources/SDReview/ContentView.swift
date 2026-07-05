@@ -633,7 +633,7 @@ private struct GridSkimTile: View {
             ZStack(alignment: .topTrailing) {
                 thumbnail
                     .frame(maxWidth: .infinity)
-                    .aspectRatio(4.0 / 3.0, contentMode: .fit)
+                    .frame(height: 96)
                     .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 5))
                     .clipShape(RoundedRectangle(cornerRadius: 5))
                 decisionMarker
@@ -658,7 +658,7 @@ private struct GridSkimTile: View {
             .foregroundStyle(.secondary)
         }
         .padding(7)
-        .frame(minHeight: 150)
+        .frame(height: 152)
         .background(tileBackground, in: RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(isCurrent ? Color.indigo : Color.secondary.opacity(0.25), lineWidth: isCurrent ? 2 : 0.5))
         .opacity(item.decision == .reject ? 0.55 : 1)
