@@ -1133,6 +1133,20 @@ private struct SettingsSheet: View {
                 Button("Reset Cache") { model.cacheLimitGB = 5 }
                 Spacer()
             }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Action log")
+                    Spacer()
+                    Button("Reveal") { model.revealActionLog() }
+                }
+                Text(model.actionLogPath)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
         .padding(22)
         .frame(width: 480)

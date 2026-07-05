@@ -69,6 +69,7 @@ final class AppModel: ObservableObject {
     private let scanner = MediaScanner()
     private let sessionStore = SessionStore()
     private let exporter = MediaExporter()
+    private let actionLogger = ActionLogger()
     private var previewCache: MediaPreviewCache?
     private var cacheWarmTask: Task<Bool, Never>?
     private var keyboardMonitor: Any?
@@ -86,6 +87,10 @@ final class AppModel: ObservableObject {
         if let keyboardMonitor {
             NSEvent.removeMonitor(keyboardMonitor)
         }
+    }
+
+    var actionLogPath: String {
+        actionLogger.url.path
     }
 
     var document: SessionDocument? {
@@ -160,6 +165,7 @@ final class AppModel: ObservableObject {
 
     func refreshSources() {
         detectedSources = scanner.mountedDCIMVolumes()
+        logAction("sources.refresh", details: ["count": "\(detectedSources.count)"])
     }
 
     func chooseFolder() {
@@ -170,6 +176,7 @@ final class AppModel: ObservableObject {
         panel.message = "Choose an SD card, a DCIM folder, or a copied test fixture."
         if panel.runModal() == .OK {
             sourceURL = panel.url
+            logAction("source.choose", details: ["path": panel.url?.path ?? ""])
         }
     }
 
@@ -186,6 +193,7 @@ final class AppModel: ObservableObject {
         pendingFreshDocument = nil
         let range = scanDateRange()
         let videoOffsetSeconds = videoTimeOffsetHours * 3600
+        logAction("scan.start", details: ["source": sourceURL.path, "start": "\(range.start)", "end": "\(range.end)"])
 
         Task {
             do {
@@ -212,11 +220,14 @@ final class AppModel: ObservableObject {
                     sourceUnavailable = false
                     revision += 1
                     showingResumeOffer = true
+                    logAction("scan.resumeOffer", details: ["items": "\(freshDocument.items.count)"])
                 } else {
                     applyScannedDocument(freshDocument, resumed: false)
+                    logAction("scan.complete", details: ["items": "\(freshDocument.items.count)"])
                 }
             } catch {
                 errorMessage = error.localizedDescription
+                logAction("scan.error", details: ["message": error.localizedDescription])
             }
             isScanning = false
         }
@@ -230,6 +241,7 @@ final class AppModel: ObservableObject {
         clearPendingResume()
         applyScannedDocument(document, resumed: true)
         persist()
+        logAction("resume.accept", details: ["items": "\(document.items.count)"])
     }
 
     func startFreshFromResumeOffer() {
@@ -242,14 +254,17 @@ final class AppModel: ObservableObject {
             clearPendingResume()
             applyScannedDocument(document, resumed: false)
             persist()
+            logAction("resume.startFresh", details: ["items": "\(document.items.count)"])
         } catch {
             errorMessage = error.localizedDescription
+            logAction("resume.startFresh.error", details: ["message": error.localizedDescription])
         }
     }
 
     func cancelResumeOffer() {
         clearPendingResume()
         revision += 1
+        logAction("resume.cancel")
     }
 
     func resetSession() {
@@ -261,8 +276,10 @@ final class AppModel: ObservableObject {
             resumeMessage = nil
             sourceUnavailable = false
             revision += 1
+            logAction("session.reset")
         } catch {
             errorMessage = error.localizedDescription
+            logAction("session.reset.error", details: ["message": error.localizedDescription])
         }
     }
 
@@ -281,23 +298,29 @@ final class AppModel: ObservableObject {
 
     func moveNext() {
         guard let session = reviewSession else { return }
+        let from = currentItem
         session.moveNext()
+        logAction("move.next", item: from, details: ["to": currentItem?.relativePath ?? ""])
         afterSessionChange(autoplay: true)
     }
 
     func movePrevious() {
         guard let session = reviewSession else { return }
+        let from = currentItem
         session.movePrevious()
+        logAction("move.previous", item: from, details: ["to": currentItem?.relativePath ?? ""])
         afterSessionChange(autoplay: true)
     }
 
     func jump(to item: MediaItem) {
         reviewSession?.jumpToItem(id: item.id)
+        logAction("move.jump", item: item)
         afterSessionChange(autoplay: true)
     }
 
     func toggleGridView() {
         isGridView.toggle()
+        logAction("view.gridToggle", details: ["enabled": "\(isGridView)"])
         revision += 1
     }
 
@@ -314,18 +337,25 @@ final class AppModel: ObservableObject {
 
     func markKeep() {
         guard let session = reviewSession else { return }
+        let item = currentItem
+        let priorDecision = item?.decision.rawValue ?? ""
         session.markKeepOrToggle()
+        logAction("decision.keepToggle", item: item, details: ["from": priorDecision])
         afterSessionChange(autoplay: true)
     }
 
     func markReject() {
         guard let session = reviewSession else { return }
+        let item = currentItem
         if let selectedSegmentID {
+            logAction("segment.remove", item: item, details: ["segmentID": selectedSegmentID.uuidString])
             session.removeSegment(segmentID: selectedSegmentID)
             self.selectedSegmentID = nil
             afterSessionChange(autoplay: false, preservePlayer: true)
         } else {
+            let priorDecision = item?.decision.rawValue ?? ""
             session.markRejectOrToggle()
+            logAction("decision.rejectToggle", item: item, details: ["from": priorDecision])
             afterSessionChange(autoplay: true)
         }
     }
@@ -333,22 +363,38 @@ final class AppModel: ObservableObject {
     func cycleFilter() {
         guard let session = reviewSession else { return }
         session.cycleFilter()
+        logAction("filter.cycle", details: ["filter": session.filter.rawValue])
         afterSessionChange(autoplay: true)
     }
 
     func setFilter(_ filter: TimelineFilter) {
         guard let session = reviewSession else { return }
         session.filter = filter
+        logAction("filter.set", details: ["filter": filter.rawValue])
         afterSessionChange(autoplay: true)
     }
 
     func undo() {
+        if pendingIn != nil || pendingOut != nil {
+            let oldIn = pendingIn
+            let oldOut = pendingOut
+            pendingIn = nil
+            pendingOut = nil
+            revision += 1
+            logAction("undo.pendingSegment", item: currentItem, details: [
+                "pendingIn": oldIn.map { secondsString($0) } ?? "",
+                "pendingOut": oldOut.map { secondsString($0) } ?? ""
+            ])
+            return
+        }
         reviewSession?.undo()
+        logAction("undo.session", item: currentItem)
         afterSessionChange(autoplay: false)
     }
 
     func redo() {
         reviewSession?.redo()
+        logAction("redo.session", item: currentItem)
         afterSessionChange(autoplay: false)
     }
 
@@ -357,9 +403,11 @@ final class AppModel: ObservableObject {
         draftCrop = currentItem?.crop ?? NormalizedCropRect(x: 0.12, y: 0.18, width: 0.76, height: 0.54, aspect: .sixteenNine)
         isCropMode = true
         isZoomed = false
+        logAction("crop.begin", item: currentItem)
     }
 
     func confirmCrop() {
+        logAction("crop.confirm", item: currentItem)
         reviewSession?.setCrop(draftCrop)
         isCropMode = false
         afterSessionChange(autoplay: false)
@@ -368,9 +416,11 @@ final class AppModel: ObservableObject {
     func cancelCrop() {
         isCropMode = false
         revision += 1
+        logAction("crop.cancel", item: currentItem)
     }
 
     func resetCrop() {
+        logAction("crop.reset", item: currentItem)
         reviewSession?.setCrop(nil)
         isCropMode = false
         afterSessionChange(autoplay: false)
@@ -411,8 +461,10 @@ final class AppModel: ObservableObject {
         guard let player else { return }
         if player.timeControlStatus == .playing {
             player.pause()
+            logAction("video.pause", item: currentItem, details: ["seconds": secondsString(currentPlaybackSeconds)])
         } else {
             player.playImmediately(atRate: playbackRate)
+            logAction("video.play", item: currentItem, details: ["seconds": secondsString(currentPlaybackSeconds), "rate": "\(playbackRate)"])
         }
     }
 
@@ -421,11 +473,13 @@ final class AppModel: ObservableObject {
         if player?.timeControlStatus == .playing {
             player?.rate = playbackRate
         }
+        logAction("video.rate", item: currentItem, details: ["rate": "\(playbackRate)"])
     }
 
     func toggleMute() {
         isMuted.toggle()
         player?.isMuted = isMuted
+        logAction("video.muteToggle", item: currentItem, details: ["muted": "\(isMuted)"])
     }
 
     func jump(seconds: Double) {
@@ -433,6 +487,7 @@ final class AppModel: ObservableObject {
         let next = max(0, min(videoDurationSeconds, currentPlaybackSeconds + seconds))
         player.seek(to: CMTime(seconds: next, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         currentPlaybackSeconds = next
+        logAction("video.jump", item: currentItem, details: ["seconds": secondsString(next)])
     }
 
     func stepFrame(delta: Int) {
@@ -444,9 +499,11 @@ final class AppModel: ObservableObject {
         let now = currentPlaybackSeconds
         if let selectedSegmentID {
             reviewSession?.replaceSegment(segmentID: selectedSegmentID, start: now)
+            logAction("segment.remarkIn", item: currentItem, details: ["seconds": secondsString(now), "segmentID": selectedSegmentID.uuidString])
             afterSessionChange(autoplay: false, preservePlayer: true)
         } else {
             pendingIn = now
+            logAction("pending.in", item: currentItem, details: ["seconds": secondsString(now)])
         }
     }
 
@@ -455,15 +512,18 @@ final class AppModel: ObservableObject {
         let now = currentPlaybackSeconds
         if let selectedSegmentID {
             reviewSession?.replaceSegment(segmentID: selectedSegmentID, end: now)
+            logAction("segment.remarkOut", item: currentItem, details: ["seconds": secondsString(now), "segmentID": selectedSegmentID.uuidString])
             afterSessionChange(autoplay: false, preservePlayer: true)
         } else {
             pendingOut = now
+            logAction("pending.out", item: currentItem, details: ["seconds": secondsString(now)])
         }
     }
 
     func bankPendingSegment() {
         guard currentItem?.kind == .video else { return }
         guard let pendingIn, let pendingOut else { return }
+        logAction("segment.bank", item: currentItem, details: ["pendingIn": secondsString(pendingIn), "pendingOut": secondsString(pendingOut)])
         reviewSession?.addSegment(start: pendingIn, end: pendingOut)
         self.pendingIn = nil
         self.pendingOut = nil
@@ -482,17 +542,24 @@ final class AppModel: ObservableObject {
         if let selectedSegment {
             player?.seek(to: CMTime(seconds: selectedSegment.startSeconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         }
+        logAction("segment.select", item: currentItem, details: ["segmentID": selectedSegmentID?.uuidString ?? ""])
         revision += 1
     }
 
     func clearVideoSelectionOrPending() {
         if selectedSegmentID != nil {
+            logAction("segment.deselect", item: currentItem, details: ["segmentID": selectedSegmentID?.uuidString ?? ""])
             selectedSegmentID = nil
         } else if pendingIn != nil || pendingOut != nil {
+            logAction("pending.clear", item: currentItem, details: [
+                "pendingIn": pendingIn.map { secondsString($0) } ?? "",
+                "pendingOut": pendingOut.map { secondsString($0) } ?? ""
+            ])
             pendingIn = nil
             pendingOut = nil
         } else if isCropMode {
             isCropMode = false
+            logAction("crop.cancel", item: currentItem)
         }
         revision += 1
     }
@@ -505,6 +572,7 @@ final class AppModel: ObservableObject {
         exportFailures = []
         exportMessage = nil
         showingExport = true
+        logAction("export.prepare", details: ["keepers": "\(exportTotalItems)"])
     }
 
     func runExport() {
@@ -520,6 +588,7 @@ final class AppModel: ObservableObject {
             flatMediaFolder: flatExport,
             videoHandleSeconds: videoHandleSeconds
         )
+        logAction("export.start", details: ["destination": exportDestination.path, "keepers": "\(exportTotalItems)"])
         Task {
             do {
                 let report = try await exporter.export(document: document, options: options) { progress in
@@ -532,8 +601,10 @@ final class AppModel: ObservableObject {
                 }
                 exportFailures = report.manifest.failures
                 exportMessage = "Exported \(report.manifest.items.reduce(0) { $0 + $1.outputFilenames.count }) files to \(report.destination.path)."
+                logAction("export.complete", details: ["destination": report.destination.path, "failures": "\(report.manifest.failures.count)"])
             } catch {
                 exportMessage = error.localizedDescription
+                logAction("export.error", details: ["message": error.localizedDescription])
             }
             isExporting = false
         }
@@ -544,6 +615,7 @@ final class AppModel: ObservableObject {
         let next = max(0, min(videoDurationSeconds, seconds))
         player.seek(to: CMTime(seconds: next, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         currentPlaybackSeconds = next
+        logAction("video.seek", item: currentItem, details: ["seconds": secondsString(next)])
     }
 
     func seekVideo(fraction: Double) {
@@ -560,7 +632,13 @@ final class AppModel: ObservableObject {
             reviewSession?.replaceSegment(segmentID: segmentID, end: seconds)
         }
         persist()
+        logAction("segment.edgeDrag", item: currentItem, details: ["segmentID": segmentID.uuidString, "edge": edge == .start ? "start" : "end", "seconds": secondsString(seconds)])
         revision += 1
+    }
+
+    func revealActionLog() {
+        actionLogger.ensureExists()
+        NSWorkspace.shared.activateFileViewerSelecting([actionLogger.url])
     }
 
     private func handle(event: NSEvent) -> Bool {
@@ -742,6 +820,14 @@ final class AppModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func logAction(_ event: String, item: MediaItem? = nil, details: [String: String] = [:]) {
+        actionLogger.record(event, item: item ?? currentItem, details: details)
+    }
+
+    private func secondsString(_ seconds: Double) -> String {
+        String(format: "%.3f", seconds)
     }
 
     private func applyScannedDocument(_ document: SessionDocument, resumed: Bool) {

@@ -47,6 +47,26 @@ final class ReviewSessionTests: XCTestCase {
         XCTAssertEqual(session.document.items.map(\.decision), [.undecided, .undecided])
     }
 
+    func testUndoAfterTwoRejectsRestoresOnlyMostRecentReject() {
+        let now = Date()
+        let document = SessionDocument(
+            sourceRoot: "/tmp/card/DCIM",
+            items: [
+                MediaItem(sourceRoot: "/tmp/card/DCIM", relativePath: "100_FUJI/DSCF0001.JPG", filename: "DSCF0001.JPG", kind: .photo, captureDate: now, fileSize: 1),
+                MediaItem(sourceRoot: "/tmp/card/DCIM", relativePath: "100_FUJI/DSCF0002.JPG", filename: "DSCF0002.JPG", kind: .photo, captureDate: now.addingTimeInterval(1), fileSize: 1),
+                MediaItem(sourceRoot: "/tmp/card/DCIM", relativePath: "100_FUJI/DSCF0003.MOV", filename: "DSCF0003.MOV", kind: .video, captureDate: now.addingTimeInterval(2), fileSize: 1)
+            ]
+        )
+        let session = ReviewSession(document: document)
+
+        session.markRejectOrToggle()
+        session.markRejectOrToggle()
+        session.undo()
+
+        XCTAssertEqual(session.document.items.map(\.decision), [.reject, .undecided, .undecided])
+        XCTAssertEqual(session.currentItem?.filename, "DSCF0002.JPG")
+    }
+
     func testSegmentImpliesKeep() {
         let document = SessionDocument(
             sourceRoot: "/tmp/card/DCIM",
