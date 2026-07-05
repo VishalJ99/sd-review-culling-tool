@@ -4,6 +4,8 @@
 DerivedData/
 *.xcuserdata/
 *.xcuserstate
+__pycache__/
+*.pyc
 
 # Local copied SD-card media and smoke-test exports.
 .local-test-data/

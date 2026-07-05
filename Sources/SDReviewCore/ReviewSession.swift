@@ -62,6 +62,12 @@ public final class ReviewSession {
         move(delta: -1)
     }
 
+    public func jumpToItem(id: String) {
+        guard document.items.contains(where: { $0.id == id }) else { return }
+        currentItemID = id
+        document.lastItemID = id
+    }
+
     public func cycleFilter() {
         perform {
             filter = filter.next()
