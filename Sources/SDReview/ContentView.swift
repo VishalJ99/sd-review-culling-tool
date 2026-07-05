@@ -419,8 +419,7 @@ private struct CropResizeHandle: View {
                             dragStart = model.draftCrop
                         }
                         guard let dragStart else { return }
-                        model.draftCrop = resizedCrop(from: dragStart, translation: value.translation)
-                        model.revision += 1
+                        model.resizeDraftCropFromHandles(resizedCrop(from: dragStart, translation: value.translation))
                     }
                     .onEnded { _ in
                         dragStart = nil

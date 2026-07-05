@@ -368,6 +368,7 @@ public final class MediaExporter {
     ) -> [ExportedOutputFile]? {
         guard let previous = previousManifest?.items.first(where: { $0.sourceRelativePath == item.relativePath }),
               previous.fileSize == item.fileSize,
+              previous.sha256 == (try? sha256File(item.fileURL)),
               previous.decision == item.decision,
               previous.crop == item.crop,
               previous.segments == item.segments,

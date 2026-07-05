@@ -339,18 +339,7 @@ final class AppModel: ObservableObject {
         draftCrop.aspect = aspect
         let ratio = aspect == .original ? currentPhotoAspect : aspect.ratio
         if let ratio {
-            let centerX = draftCrop.x + draftCrop.width / 2
-            let centerY = draftCrop.y + draftCrop.height / 2
-            var width = draftCrop.width
-            var height = width / ratio
-            if height > 0.9 {
-                height = min(0.9, draftCrop.height)
-                width = height * ratio
-            }
-            draftCrop.width = min(width, 0.95)
-            draftCrop.height = min(height, 0.95)
-            draftCrop.x = centerX - draftCrop.width / 2
-            draftCrop.y = centerY - draftCrop.height / 2
+            applyAspectRatio(ratio)
         }
         draftCrop.clamp()
         revision += 1
@@ -610,13 +599,13 @@ final class AppModel: ObservableObject {
         let step = option ? 0.005 : 0.02
         switch event.keyCode {
         case 123:
-            shift ? draftCrop.resize(dw: -step, dh: 0) : draftCrop.move(dx: -step, dy: 0)
+            shift ? resizeDraftCrop(dw: -step, dh: 0) : draftCrop.move(dx: -step, dy: 0)
         case 124:
-            shift ? draftCrop.resize(dw: step, dh: 0) : draftCrop.move(dx: step, dy: 0)
+            shift ? resizeDraftCrop(dw: step, dh: 0) : draftCrop.move(dx: step, dy: 0)
         case 125:
-            shift ? draftCrop.resize(dw: 0, dh: step) : draftCrop.move(dx: 0, dy: step)
+            shift ? resizeDraftCrop(dw: 0, dh: step) : draftCrop.move(dx: 0, dy: step)
         case 126:
-            shift ? draftCrop.resize(dw: 0, dh: -step) : draftCrop.move(dx: 0, dy: -step)
+            shift ? resizeDraftCrop(dw: 0, dh: -step) : draftCrop.move(dx: 0, dy: -step)
         case 36:
             confirmCrop()
             return true
@@ -637,6 +626,53 @@ final class AppModel: ObservableObject {
         }
         revision += 1
         return true
+    }
+
+    private func resizeDraftCrop(dw: Double, dh: Double) {
+        if let ratio = activeDraftCropRatio() {
+            let centerX = draftCrop.x + draftCrop.width / 2
+            let centerY = draftCrop.y + draftCrop.height / 2
+            if abs(dw) >= abs(dh) {
+                draftCrop.width += dw
+                draftCrop.height = draftCrop.width / ratio
+            } else {
+                draftCrop.height += dh
+                draftCrop.width = draftCrop.height * ratio
+            }
+            draftCrop.x = centerX - draftCrop.width / 2
+            draftCrop.y = centerY - draftCrop.height / 2
+            draftCrop.clamp()
+        } else {
+            draftCrop.resize(dw: dw, dh: dh)
+        }
+    }
+
+    func activeDraftCropRatio() -> Double? {
+        draftCrop.aspect == .original ? currentPhotoAspect : draftCrop.aspect.ratio
+    }
+
+    func resizeDraftCropFromHandles(_ crop: NormalizedCropRect) {
+        draftCrop = crop
+        if let ratio = activeDraftCropRatio() {
+            applyAspectRatio(ratio)
+        }
+        draftCrop.clamp()
+        revision += 1
+    }
+
+    private func applyAspectRatio(_ ratio: Double) {
+        let centerX = draftCrop.x + draftCrop.width / 2
+        let centerY = draftCrop.y + draftCrop.height / 2
+        var width = draftCrop.width
+        var height = width / ratio
+        if height > 0.95 {
+            height = min(0.95, draftCrop.height)
+            width = height * ratio
+        }
+        draftCrop.width = min(width, 0.95)
+        draftCrop.height = min(height, 0.95)
+        draftCrop.x = centerX - draftCrop.width / 2
+        draftCrop.y = centerY - draftCrop.height / 2
     }
 
     private func afterSessionChange(autoplay: Bool, preservePlayer: Bool = false) {

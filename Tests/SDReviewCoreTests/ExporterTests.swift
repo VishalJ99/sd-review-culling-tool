@@ -153,4 +153,52 @@ final class ExporterTests: XCTestCase {
         let outputURL = export.appendingPathComponent(outputName)
         XCTAssertEqual(try Data(contentsOf: outputURL), Data("good".utf8))
     }
+
+    func testExporterDoesNotReusePreviousOutputWhenSourceHashChanges() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let source = root.appendingPathComponent("DCIM", isDirectory: true)
+        let folder = source.appendingPathComponent("100_FUJI", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let captureDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let sourceURL = folder.appendingPathComponent("DSCF0001.JPG")
+        try Data("aaaa".utf8).write(to: sourceURL)
+        let item = MediaItem(
+            sourceRoot: source.path,
+            relativePath: "100_FUJI/DSCF0001.JPG",
+            filename: "DSCF0001.JPG",
+            kind: .photo,
+            captureDate: captureDate,
+            fileSize: 4,
+            decision: .keep
+        )
+        let destination = root.appendingPathComponent("export", isDirectory: true)
+        let exporter = MediaExporter()
+        let first = try await exporter.export(
+            document: SessionDocument(sourceRoot: source.path, items: [item]),
+            options: ExportOptions(destination: destination)
+        )
+        let outputName = try XCTUnwrap(first.manifest.items.first?.outputFilenames.first)
+        let outputURL = destination.appendingPathComponent("photos").appendingPathComponent(outputName)
+        XCTAssertEqual(try Data(contentsOf: outputURL), Data("aaaa".utf8))
+
+        try Data("bbbb".utf8).write(to: sourceURL)
+        let changedItem = MediaItem(
+            sourceRoot: source.path,
+            relativePath: "100_FUJI/DSCF0001.JPG",
+            filename: "DSCF0001.JPG",
+            kind: .photo,
+            captureDate: captureDate,
+            fileSize: 4,
+            decision: .keep
+        )
+        _ = try await exporter.export(
+            document: SessionDocument(sourceRoot: source.path, items: [changedItem]),
+            options: ExportOptions(destination: destination)
+        )
+
+        XCTAssertEqual(try Data(contentsOf: outputURL), Data("bbbb".utf8))
+    }
 }
