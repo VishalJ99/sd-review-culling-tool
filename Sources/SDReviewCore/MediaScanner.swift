@@ -36,7 +36,13 @@ public final class MediaScanner {
         for fileURL in fileURLs {
             let relativePath = relativePath(for: fileURL, root: root)
             let ext = fileURL.pathExtension.lowercased()
-            let resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .creationDateKey])
+            let resourceValues: URLResourceValues
+            do {
+                resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .creationDateKey])
+            } catch {
+                problems.append(MediaProblem(relativePath: relativePath, message: "Cannot read file attributes; skipped."))
+                continue
+            }
             let fallbackDate = resourceValues.contentModificationDate ?? resourceValues.creationDate ?? .distantPast
             if ext == "raf" {
                 if dateRange?.contains(fallbackDate) ?? true {
@@ -57,9 +63,21 @@ public final class MediaScanner {
 
             if ext == "jpg" || ext == "jpeg" {
                 kind = .photo
+                guard isReadablePhoto(fileURL: fileURL) else {
+                    if dateRange?.contains(fallbackDate) ?? true {
+                        problems.append(MediaProblem(relativePath: relativePath, message: "Unreadable JPEG; skipped."))
+                    }
+                    continue
+                }
                 metadataDate = photoCaptureDate(fileURL: fileURL)
             } else if ext == "mov" {
                 kind = .video
+                guard isReadableVideo(fileURL: fileURL) else {
+                    if dateRange?.contains(fallbackDate) ?? true {
+                        problems.append(MediaProblem(relativePath: relativePath, message: "Unreadable MOV; skipped."))
+                    }
+                    continue
+                }
                 metadataDate = videoCaptureDate(fileURL: fileURL)
             } else {
                 continue
@@ -163,6 +181,22 @@ public final class MediaScanner {
         return fileURL.lastPathComponent
     }
 
+    private func isReadablePhoto(fileURL: URL) -> Bool {
+        guard let imageSource = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+              CGImageSourceGetCount(imageSource) > 0 else {
+            return false
+        }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 64,
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: false
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) != nil
+    }
+
     private func photoCaptureDate(fileURL: URL) -> Date? {
         guard let imageSource = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] else {
@@ -173,6 +207,25 @@ public final class MediaScanner {
         let dateString = exif?[kCGImagePropertyExifDateTimeOriginal] as? String
         let subSecond = exif?[kCGImagePropertyExifSubsecTimeOriginal] as? String
         return parseCameraDate(dateString, subSecond: subSecond)
+    }
+
+    private func isReadableVideo(fileURL: URL) -> Bool {
+        let asset = AVURLAsset(url: fileURL)
+        guard !asset.tracks(withMediaType: .video).isEmpty else {
+            return false
+        }
+
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 64, height: 64)
+        let duration = asset.duration.seconds.isFinite ? asset.duration.seconds : 0
+        let time = CMTime(seconds: min(max(duration * 0.1, 0), 1.0), preferredTimescale: 600)
+        do {
+            _ = try generator.copyCGImage(at: time, actualTime: nil)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func videoCaptureDate(fileURL: URL) -> Date? {

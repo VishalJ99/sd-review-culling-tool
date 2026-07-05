@@ -23,6 +23,24 @@ final class MediaScannerTests: XCTestCase {
         XCTAssertEqual(result.heifFiles, ["100_FUJI/DSCF0002.HEIF"])
     }
 
+    func testScannerSkipsUnreadableReviewMediaAndReportsProblems() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dcim = root.appendingPathComponent("DCIM/100_FUJI", isDirectory: true)
+        try FileManager.default.createDirectory(at: dcim, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try makeJPEG(at: dcim.appendingPathComponent("DSCF0001.JPG"))
+        FileManager.default.createFile(atPath: dcim.appendingPathComponent("DSCF0002.JPG").path, contents: Data("not a jpeg".utf8))
+        FileManager.default.createFile(atPath: dcim.appendingPathComponent("DSCF0003.MOV").path, contents: Data("not a mov".utf8))
+
+        let result = try MediaScanner().scan(source: root)
+
+        XCTAssertEqual(result.items.map(\.relativePath), ["100_FUJI/DSCF0001.JPG"])
+        XCTAssertTrue(result.problems.contains(MediaProblem(relativePath: "100_FUJI/DSCF0002.JPG", message: "Unreadable JPEG; skipped.")))
+        XCTAssertTrue(result.problems.contains(MediaProblem(relativePath: "100_FUJI/DSCF0003.MOV", message: "Unreadable MOV; skipped.")))
+    }
+
     private func makeJPEG(at url: URL) throws {
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         guard let context = CGContext(

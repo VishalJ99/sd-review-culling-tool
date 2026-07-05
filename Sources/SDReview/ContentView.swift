@@ -19,6 +19,9 @@ struct ContentView: View {
         .sheet(isPresented: $model.showingExport) {
             ExportSheet(model: model)
         }
+        .sheet(isPresented: $model.showingResumeOffer) {
+            ResumeOfferSheet(model: model)
+        }
         .sheet(isPresented: $model.showingProblems) {
             ProblemsSheet(model: model)
         }
@@ -230,38 +233,55 @@ private struct PhotoReviewPane: View {
 
     var body: some View {
         let _ = model.cacheRevision
-        ZStack {
-            Color(nsColor: .textBackgroundColor)
-            if let previewURL = model.cachedImageURL(for: item, variant: .preview),
-               let image = NSImage(contentsOf: previewURL) {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.medium)
-                    .scaledToFit()
-                    .scaleEffect(model.isZoomed ? 1.9 : 1.0)
-                    .animation(.easeOut(duration: 0.12), value: model.isZoomed)
-                    .padding(model.isZoomed ? 0 : 20)
-                    .onAppear {
-                        model.setCurrentPhotoAspect(width: image.size.width, height: image.size.height)
-                    }
-                    .onChange(of: item.id) { _, _ in
-                        model.setCurrentPhotoAspect(width: image.size.width, height: image.size.height)
-                    }
-            } else {
-                ProgressView()
-                    .onAppear {
-                        model.ensureCachedImage(for: item, variant: .preview)
-                    }
-            }
-
-            if model.isCropMode {
+        GeometryReader { proxy in
+            ZStack {
+                Color(nsColor: .textBackgroundColor)
                 if let previewURL = model.cachedImageURL(for: item, variant: .preview),
                    let image = NSImage(contentsOf: previewURL) {
-                    CropOverlay(model: model, imageSize: image.size)
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.medium)
+                        .scaledToFit()
+                        .scaleEffect(model.isZoomed ? zoomScale(imageSize: image.size, containerSize: proxy.size) : 1.0, anchor: model.zoomAnchor)
+                        .animation(.easeOut(duration: 0.12), value: model.isZoomed)
+                        .padding(model.isZoomed ? 0 : 20)
+                        .onAppear {
+                            model.setCurrentPhotoAspect(width: image.size.width, height: image.size.height)
+                        }
+                        .onChange(of: item.id) { _, _ in
+                            model.setCurrentPhotoAspect(width: image.size.width, height: image.size.height)
+                        }
+                } else {
+                    ProgressView()
+                        .onAppear {
+                            model.ensureCachedImage(for: item, variant: .preview)
+                        }
+                }
+
+                if model.isCropMode {
+                    if let previewURL = model.cachedImageURL(for: item, variant: .preview),
+                       let image = NSImage(contentsOf: previewURL) {
+                        CropOverlay(model: model, imageSize: image.size)
+                    }
+                }
+            }
+            .clipped()
+            .onContinuousHover { phase in
+                if case .active(let location) = phase {
+                    model.updateZoomAnchor(location: location, containerSize: proxy.size)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func zoomScale(imageSize: CGSize, containerSize: CGSize) -> CGFloat {
+        guard imageSize.width > 0, imageSize.height > 0, containerSize.width > 0, containerSize.height > 0 else {
+            return 1.9
+        }
+        let fitScale = min(containerSize.width / imageSize.width, containerSize.height / imageSize.height)
+        guard fitScale > 0 else { return 1.9 }
+        return min(max(1 / fitScale, 1.2), 6.0)
     }
 }
 
@@ -960,6 +980,42 @@ private struct ExportSheet: View {
         model.document?.items.filter { $0.decision == .keep && $0.kind == .video }.reduce(0) { total, item in
             total + max(1, item.segments.count)
         } ?? 0
+    }
+}
+
+private struct ResumeOfferSheet: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Resume saved session?")
+                .font(.headline)
+
+            if let document = model.pendingResumeDocument {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        StatePill(text: "\(document.items.filter { $0.decision == .keep }.count) keeps", color: .green)
+                        StatePill(text: "\(document.items.filter { $0.decision == .reject }.count) rejects", color: .red)
+                        StatePill(text: "\(document.items.filter { $0.decision == .undecided }.count) undecided", color: .secondary)
+                    }
+                    Text(document.sourceRoot)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { model.cancelResumeOffer() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Start Fresh") { model.startFreshFromResumeOffer() }
+                Button("Resume") { model.acceptResumeOffer() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
     }
 }
 

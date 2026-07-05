@@ -30,6 +30,7 @@ final class AppModel: ObservableObject {
     @Published var draftCrop = NormalizedCropRect(x: 0.12, y: 0.18, width: 0.76, height: 0.54, aspect: .sixteenNine)
     @Published var currentPhotoAspect: Double?
     @Published var isZoomed = false
+    @Published var zoomAnchor = UnitPoint.center
     @Published var showingExport = false
     @Published var exportDestination: URL = AppModel.defaultExportDestination()
     @Published var flatExport = false
@@ -45,6 +46,9 @@ final class AppModel: ObservableObject {
     @Published var isGridView = false
     @Published var sourceUnavailable = false
     @Published var resumeMessage: String?
+    @Published var showingResumeOffer = false
+    @Published var pendingResumeDocument: SessionDocument?
+    @Published var pendingFreshDocument: SessionDocument?
     @Published var currentVideoFrameDuration = 1.0 / 30.0
     @Published var videoTimeOffsetHours: Double = AppModel.defaultDouble(key: "videoTimeOffsetHours", defaultValue: 0) {
         didSet { UserDefaults.standard.set(videoTimeOffsetHours, forKey: AppModel.defaultsKey("videoTimeOffsetHours")) }
@@ -177,6 +181,9 @@ final class AppModel: ObservableObject {
         isScanning = true
         errorMessage = nil
         exportMessage = nil
+        showingResumeOffer = false
+        pendingResumeDocument = nil
+        pendingFreshDocument = nil
         let range = scanDateRange()
         let videoOffsetSeconds = videoTimeOffsetHours * 3600
 
@@ -196,19 +203,53 @@ final class AppModel: ObservableObject {
                     heifFiles: result.heifFiles,
                     problems: result.problems
                 )
-                let document = loaded.map { merge(fresh: freshDocument, loaded: $0) } ?? freshDocument
-                reviewSession = ReviewSession(document: document)
-                resumeMessage = loaded == nil ? nil : "Resumed saved session."
-                sourceUnavailable = false
-                configurePreviewCache(for: document)
-                revision += 1
-                warmCacheAroundCurrent()
-                configurePlayerForCurrentItem(autoplay: true)
+                if let loaded {
+                    pendingFreshDocument = freshDocument
+                    pendingResumeDocument = merge(fresh: freshDocument, loaded: loaded)
+                    reviewSession = nil
+                    resumeMessage = nil
+                    previewCache = nil
+                    sourceUnavailable = false
+                    revision += 1
+                    showingResumeOffer = true
+                } else {
+                    applyScannedDocument(freshDocument, resumed: false)
+                }
             } catch {
                 errorMessage = error.localizedDescription
             }
             isScanning = false
         }
+    }
+
+    func acceptResumeOffer() {
+        guard let document = pendingResumeDocument else {
+            cancelResumeOffer()
+            return
+        }
+        clearPendingResume()
+        applyScannedDocument(document, resumed: true)
+        persist()
+    }
+
+    func startFreshFromResumeOffer() {
+        guard let document = pendingFreshDocument else {
+            cancelResumeOffer()
+            return
+        }
+        do {
+            try sessionStore.reset(sourceRoot: document.sourceRoot, dateRange: document.dateRange, cardFingerprint: document.cardFingerprint)
+            clearPendingResume()
+            applyScannedDocument(document, resumed: false)
+            persist()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func cancelResumeOffer() {
+        clearPendingResume()
+        revision += 1
     }
 
     func resetSession() {
@@ -357,6 +398,13 @@ final class AppModel: ObservableObject {
     func setCurrentPhotoAspect(width: CGFloat, height: CGFloat) {
         guard width > 0, height > 0 else { return }
         currentPhotoAspect = Double(width / height)
+    }
+
+    func updateZoomAnchor(location: CGPoint, containerSize: CGSize) {
+        guard containerSize.width > 0, containerSize.height > 0 else { return }
+        let x = min(max(location.x / containerSize.width, 0), 1)
+        let y = min(max(location.y / containerSize.height, 0), 1)
+        zoomAnchor = UnitPoint(x: x, y: y)
     }
 
     func togglePlay() {
@@ -694,6 +742,22 @@ final class AppModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func applyScannedDocument(_ document: SessionDocument, resumed: Bool) {
+        reviewSession = ReviewSession(document: document)
+        resumeMessage = resumed ? "Resumed saved session." : nil
+        sourceUnavailable = false
+        configurePreviewCache(for: document)
+        revision += 1
+        warmCacheAroundCurrent()
+        configurePlayerForCurrentItem(autoplay: true)
+    }
+
+    private func clearPendingResume() {
+        showingResumeOffer = false
+        pendingResumeDocument = nil
+        pendingFreshDocument = nil
     }
 
     private func configurePlayerForCurrentItem(autoplay: Bool) {
