@@ -62,4 +62,28 @@ final class ReviewSessionTests: XCTestCase {
         XCTAssertEqual(session.document.items[0].segments[0].startSeconds, 1)
         XCTAssertEqual(session.document.items[0].segments[0].endSeconds, 4)
     }
+
+    func testUndoStackPersistsThroughSessionStore() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let document = SessionDocument(
+            sourceRoot: "/tmp/card/DCIM",
+            items: [
+                MediaItem(sourceRoot: "/tmp/card/DCIM", relativePath: "100_FUJI/DSCF0001.JPG", filename: "DSCF0001.JPG", kind: .photo, captureDate: Date(), fileSize: 1)
+            ]
+        )
+        let session = ReviewSession(document: document)
+        session.markKeepOrToggle()
+
+        let store = SessionStore(directory: directory)
+        try store.save(session.document, dateRange: nil)
+        let loaded = try XCTUnwrap(store.load(sourceRoot: "/tmp/card/DCIM", dateRange: nil))
+        let restored = ReviewSession(document: loaded)
+
+        restored.undo()
+
+        XCTAssertEqual(restored.document.items[0].decision, .undecided)
+    }
 }

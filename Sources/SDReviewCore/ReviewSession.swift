@@ -3,8 +3,6 @@ import Foundation
 public final class ReviewSession {
     public private(set) var document: SessionDocument
     public private(set) var currentItemID: String?
-    private var undoStack: [SessionDocument] = []
-    private var redoStack: [SessionDocument] = []
     private let undoLimit: Int
 
     public init(document: SessionDocument, undoLimit: Int = 200) {
@@ -132,17 +130,15 @@ public final class ReviewSession {
     }
 
     public func undo() {
-        guard let previous = undoStack.popLast() else { return }
-        redoStack.append(document)
-        document = previous
-        currentItemID = document.lastItemID ?? document.items.first?.id
+        guard let previous = document.undoStack.popLast() else { return }
+        document.redoStack.append(snapshot())
+        apply(previous)
     }
 
     public func redo() {
-        guard let next = redoStack.popLast() else { return }
-        undoStack.append(document)
-        document = next
-        currentItemID = document.lastItemID ?? document.items.first?.id
+        guard let next = document.redoStack.popLast() else { return }
+        document.undoStack.append(snapshot())
+        apply(next)
     }
 
     private func setDecisionOrToggle(_ decision: ReviewDecision) {
@@ -174,19 +170,30 @@ public final class ReviewSession {
     }
 
     private func perform(_ change: () -> Void) {
-        let before = document
+        let before = snapshot()
         change()
-        guard before != document else { return }
-        undoStack.append(before)
-        if undoStack.count > undoLimit {
-            undoStack.removeFirst(undoStack.count - undoLimit)
+        guard before != snapshot() else { return }
+        document.undoStack.append(before)
+        if document.undoStack.count > undoLimit {
+            document.undoStack.removeFirst(document.undoStack.count - undoLimit)
         }
-        redoStack.removeAll()
+        document.redoStack.removeAll()
     }
 
     private func updateItem(id: String, mutate: (inout MediaItem) -> Void) {
         guard let index = document.items.firstIndex(where: { $0.id == id }) else { return }
         mutate(&document.items[index])
         document.lastItemID = currentItemID
+    }
+
+    private func snapshot() -> ReviewSnapshot {
+        ReviewSnapshot(lastItemID: document.lastItemID, filter: document.filter, items: document.items)
+    }
+
+    private func apply(_ snapshot: ReviewSnapshot) {
+        document.items = snapshot.items
+        document.filter = snapshot.filter
+        document.lastItemID = snapshot.lastItemID
+        currentItemID = snapshot.lastItemID ?? snapshot.items.first?.id
     }
 }

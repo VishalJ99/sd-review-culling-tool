@@ -237,6 +237,8 @@ public struct SessionDocument: Codable, Equatable, Sendable {
     public var rawFiles: [String]
     public var heifFiles: [String]
     public var problems: [MediaProblem]
+    public var undoStack: [ReviewSnapshot]
+    public var redoStack: [ReviewSnapshot]
 
     public init(
         toolVersion: String = sdReviewToolVersion,
@@ -247,7 +249,9 @@ public struct SessionDocument: Codable, Equatable, Sendable {
         items: [MediaItem],
         rawFiles: [String] = [],
         heifFiles: [String] = [],
-        problems: [MediaProblem] = []
+        problems: [MediaProblem] = [],
+        undoStack: [ReviewSnapshot] = [],
+        redoStack: [ReviewSnapshot] = []
     ) {
         self.toolVersion = toolVersion
         self.sourceRoot = sourceRoot
@@ -258,5 +262,19 @@ public struct SessionDocument: Codable, Equatable, Sendable {
         self.rawFiles = rawFiles
         self.heifFiles = heifFiles
         self.problems = problems
+        self.undoStack = undoStack
+        self.redoStack = redoStack
+    }
+}
+
+public struct ReviewSnapshot: Codable, Equatable, Sendable {
+    public var lastItemID: String?
+    public var filter: TimelineFilter
+    public var items: [MediaItem]
+
+    public init(lastItemID: String?, filter: TimelineFilter, items: [MediaItem]) {
+        self.lastItemID = lastItemID
+        self.filter = filter
+        self.items = items
     }
 }
