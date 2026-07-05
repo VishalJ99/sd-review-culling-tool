@@ -12,3 +12,4 @@ __pycache__/
 
 # Temporary export destinations created while testing.
 Exports/
+dist/

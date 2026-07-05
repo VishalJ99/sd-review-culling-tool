@@ -184,10 +184,11 @@ final class AppModel: ObservableObject {
         if let selectedSegmentID {
             session.removeSegment(segmentID: selectedSegmentID)
             self.selectedSegmentID = nil
+            afterSessionChange(autoplay: false, preservePlayer: true)
         } else {
             session.markRejectOrToggle()
+            afterSessionChange(autoplay: true)
         }
-        afterSessionChange(autoplay: true)
     }
 
     func cycleFilter() {
@@ -295,7 +296,7 @@ final class AppModel: ObservableObject {
         let now = currentPlaybackSeconds
         if let selectedSegmentID {
             reviewSession?.replaceSegment(segmentID: selectedSegmentID, start: now)
-            afterSessionChange(autoplay: false)
+            afterSessionChange(autoplay: false, preservePlayer: true)
         } else {
             pendingIn = now
         }
@@ -305,7 +306,7 @@ final class AppModel: ObservableObject {
         let now = currentPlaybackSeconds
         if let selectedSegmentID {
             reviewSession?.replaceSegment(segmentID: selectedSegmentID, end: now)
-            afterSessionChange(autoplay: false)
+            afterSessionChange(autoplay: false, preservePlayer: true)
         } else {
             pendingOut = now
         }
@@ -316,7 +317,7 @@ final class AppModel: ObservableObject {
         reviewSession?.addSegment(start: pendingIn, end: pendingOut)
         self.pendingIn = nil
         self.pendingOut = nil
-        afterSessionChange(autoplay: false)
+        afterSessionChange(autoplay: false, preservePlayer: true)
     }
 
     func selectNextSegment(delta: Int) {
@@ -478,13 +479,15 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    private func afterSessionChange(autoplay: Bool) {
+    private func afterSessionChange(autoplay: Bool, preservePlayer: Bool = false) {
         revision += 1
         pendingIn = nil
         pendingOut = nil
         selectedSegmentID = nil
         persist()
-        configurePlayerForCurrentItem(autoplay: autoplay)
+        if !preservePlayer {
+            configurePlayerForCurrentItem(autoplay: autoplay)
+        }
     }
 
     private func persist() {
@@ -514,6 +517,10 @@ final class AppModel: ObservableObject {
     }
 
     private static func defaultFixtureURL() -> URL? {
+        if let fixture = ProcessInfo.processInfo.environment["SDREVIEW_FIXTURE"], !fixture.isEmpty {
+            let url = URL(fileURLWithPath: fixture)
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        }
         let fixture = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".local-test-data/sd-last-24h-20260705-1748")
         return FileManager.default.fileExists(atPath: fixture.path) ? fixture : nil
