@@ -23,6 +23,7 @@ public final class MediaScanner {
 
         let root = scanRoot(for: sourceURL)
         let fileURLs = try mediaFileURLs(under: root)
+        let cardFingerprint = CardFingerprint.make(sourceRoot: root, mediaFileURLs: fileURLs)
         var items: [MediaItem] = []
         var rawFiles: [String] = []
         var heifFiles: [String] = []
@@ -90,6 +91,7 @@ public final class MediaScanner {
 
         return ScanResult(
             sourceRoot: root.path,
+            cardFingerprint: cardFingerprint,
             items: items,
             rawFiles: rawFiles.sorted(),
             heifFiles: heifFiles.sorted(),

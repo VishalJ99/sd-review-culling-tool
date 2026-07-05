@@ -22,14 +22,15 @@ public final class SessionStore {
         decoder.dateDecodingStrategy = .iso8601
     }
 
-    public func sessionURL(sourceRoot: String, dateRange: DateRange?) -> URL {
-        let key = "\(sourceRoot)|\(dateRange?.start.timeIntervalSince1970 ?? 0)|\(dateRange?.end.timeIntervalSince1970 ?? 0)"
+    public func sessionURL(sourceRoot: String, dateRange: DateRange?, cardFingerprint: String? = nil) -> URL {
+        let identity = cardFingerprint ?? sourceRoot
+        let key = "\(identity)|\(dateRange?.start.timeIntervalSince1970 ?? 0)|\(dateRange?.end.timeIntervalSince1970 ?? 0)"
         let digest = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
         return directory.appendingPathComponent(digest + ".json")
     }
 
-    public func load(sourceRoot: String, dateRange: DateRange?) throws -> SessionDocument? {
-        let url = sessionURL(sourceRoot: sourceRoot, dateRange: dateRange)
+    public func load(sourceRoot: String, dateRange: DateRange?, cardFingerprint: String? = nil) throws -> SessionDocument? {
+        let url = sessionURL(sourceRoot: sourceRoot, dateRange: dateRange, cardFingerprint: cardFingerprint)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let data = try Data(contentsOf: url)
         return try decoder.decode(SessionDocument.self, from: data)
@@ -37,7 +38,7 @@ public final class SessionStore {
 
     public func save(_ document: SessionDocument, dateRange: DateRange?) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = sessionURL(sourceRoot: document.sourceRoot, dateRange: dateRange)
+        let url = sessionURL(sourceRoot: document.sourceRoot, dateRange: dateRange, cardFingerprint: document.cardFingerprint)
         let temporaryURL = url.appendingPathExtension("tmp")
         let data = try encoder.encode(document)
         try data.write(to: temporaryURL, options: [.atomic])
@@ -47,8 +48,8 @@ public final class SessionStore {
         try FileManager.default.moveItem(at: temporaryURL, to: url)
     }
 
-    public func reset(sourceRoot: String, dateRange: DateRange?) throws {
-        let url = sessionURL(sourceRoot: sourceRoot, dateRange: dateRange)
+    public func reset(sourceRoot: String, dateRange: DateRange?, cardFingerprint: String? = nil) throws {
+        let url = sessionURL(sourceRoot: sourceRoot, dateRange: dateRange, cardFingerprint: cardFingerprint)
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }

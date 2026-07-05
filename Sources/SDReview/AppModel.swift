@@ -29,10 +29,13 @@ final class AppModel: ObservableObject {
     @Published var flatExport = false
     @Published var isExporting = false
     @Published var exportMessage: String?
+    @Published var cacheRevision = 0
 
     private let scanner = MediaScanner()
     private let sessionStore = SessionStore()
     private let exporter = MediaExporter()
+    private var previewCache: MediaPreviewCache?
+    private var cacheWarmTask: Task<Bool, Never>?
     private var keyboardMonitor: Any?
 
     init() {
@@ -83,6 +86,23 @@ final class AppModel: ObservableObject {
         return exporter.estimateBytes(document: document)
     }
 
+    func cachedImageURL(for item: MediaItem, variant: CacheVariant) -> URL? {
+        previewCache?.existingURL(for: item, variant: variant)
+    }
+
+    func ensureCachedImage(for item: MediaItem, variant: CacheVariant) {
+        guard let previewCache, previewCache.existingURL(for: item, variant: variant) == nil else {
+            return
+        }
+        let generationTask = Task.detached(priority: variant == .preview ? .userInitiated : .utility) { [previewCache, item, variant] in
+            _ = try? previewCache.ensureCachedImage(for: item, variant: variant)
+        }
+        Task { [weak self] in
+            await generationTask.value
+            self?.cacheRevision += 1
+        }
+    }
+
     var warningSummary: String? {
         guard let document else { return nil }
         var parts: [String] = []
@@ -129,9 +149,10 @@ final class AppModel: ObservableObject {
                     try MediaScanner().scan(source: sourceURL, dateRange: range)
                 }.value
 
-                let loaded = try sessionStore.load(sourceRoot: result.sourceRoot, dateRange: range)
+                let loaded = try sessionStore.load(sourceRoot: result.sourceRoot, dateRange: range, cardFingerprint: result.cardFingerprint)
                 let freshDocument = SessionDocument(
                     sourceRoot: result.sourceRoot,
+                    cardFingerprint: result.cardFingerprint,
                     dateRange: range,
                     items: result.items,
                     rawFiles: result.rawFiles,
@@ -140,7 +161,9 @@ final class AppModel: ObservableObject {
                 )
                 let document = loaded.map { merge(fresh: freshDocument, loaded: $0) } ?? freshDocument
                 reviewSession = ReviewSession(document: document)
+                configurePreviewCache(for: document)
                 revision += 1
+                warmCacheAroundCurrent()
                 configurePlayerForCurrentItem(autoplay: true)
             } catch {
                 errorMessage = error.localizedDescription
@@ -152,8 +175,9 @@ final class AppModel: ObservableObject {
     func resetSession() {
         guard let document else { return }
         do {
-            try sessionStore.reset(sourceRoot: document.sourceRoot, dateRange: document.dateRange)
+            try sessionStore.reset(sourceRoot: document.sourceRoot, dateRange: document.dateRange, cardFingerprint: document.cardFingerprint)
             reviewSession = nil
+            previewCache = nil
             revision += 1
         } catch {
             errorMessage = error.localizedDescription
@@ -507,6 +531,7 @@ final class AppModel: ObservableObject {
         if !preservePlayer {
             configurePlayerForCurrentItem(autoplay: autoplay)
         }
+        warmCacheAroundCurrent()
     }
 
     private func persist() {
@@ -535,6 +560,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func configurePreviewCache(for document: SessionDocument) {
+        guard let fingerprint = document.cardFingerprint else {
+            previewCache = nil
+            return
+        }
+        previewCache = MediaPreviewCache(cardFingerprint: fingerprint)
+        cacheRevision += 1
+    }
+
+    private func warmCacheAroundCurrent() {
+        guard let previewCache, let document else { return }
+        let items = document.items
+        let currentID = currentItem?.id
+        cacheWarmTask?.cancel()
+        cacheWarmTask = Task.detached(priority: .utility) { [previewCache, items, currentID] in
+            guard !Task.isCancelled else { return false }
+            previewCache.warm(items: items, currentID: currentID)
+            return !Task.isCancelled
+        }
+        guard let cacheWarmTask else { return }
+        Task { [weak self] in
+            let finished = await cacheWarmTask.value
+            if finished {
+                self?.cacheRevision += 1
+            }
+        }
+    }
+
     private func scanDateRange() -> DateRange {
         let calendar = Calendar.current
         let start = calendar.startOfDay(for: startDate)
@@ -560,6 +613,7 @@ final class AppModel: ObservableObject {
         return SessionDocument(
             toolVersion: fresh.toolVersion,
             sourceRoot: fresh.sourceRoot,
+            cardFingerprint: fresh.cardFingerprint,
             dateRange: fresh.dateRange,
             lastItemID: freshIDs.contains(loaded.lastItemID ?? "") ? loaded.lastItemID : fresh.items.first?.id,
             filter: loaded.filter,

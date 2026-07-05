@@ -194,9 +194,11 @@ private struct PhotoReviewPane: View {
     var item: MediaItem
 
     var body: some View {
+        let _ = model.cacheRevision
         ZStack {
             Color(nsColor: .textBackgroundColor)
-            if let image = NSImage(contentsOf: item.fileURL) {
+            if let previewURL = model.cachedImageURL(for: item, variant: .preview),
+               let image = NSImage(contentsOf: previewURL) {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.medium)
@@ -205,8 +207,10 @@ private struct PhotoReviewPane: View {
                     .animation(.easeOut(duration: 0.12), value: model.isZoomed)
                     .padding(model.isZoomed ? 0 : 20)
             } else {
-                Text("Unable to load \(item.filename)")
-                    .foregroundStyle(.secondary)
+                ProgressView()
+                    .onAppear {
+                        model.ensureCachedImage(for: item, variant: .preview)
+                    }
             }
 
             if model.isCropMode {
@@ -438,7 +442,7 @@ private struct FilmstripView: View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 8) {
                 ForEach(model.filteredItems) { item in
-                FilmstripTile(item: item, isCurrent: item.id == model.currentItem?.id)
+                    FilmstripTile(model: model, item: item, isCurrent: item.id == model.currentItem?.id)
                         .onTapGesture {
                             model.jump(to: item)
                         }
@@ -452,13 +456,15 @@ private struct FilmstripView: View {
 }
 
 private struct FilmstripTile: View {
+    @ObservedObject var model: AppModel
     var item: MediaItem
     var isCurrent: Bool
 
     var body: some View {
+        let _ = model.cacheRevision
         VStack(alignment: .leading, spacing: 3) {
             HStack {
-                Image(systemName: item.kind == .photo ? "photo" : "video")
+                tileImage
                 Spacer()
                 decisionMarker
             }
@@ -472,6 +478,23 @@ private struct FilmstripTile: View {
         .background(tileBackground, in: RoundedRectangle(cornerRadius: 5))
         .overlay(RoundedRectangle(cornerRadius: 5).stroke(isCurrent ? Color.indigo : Color.secondary.opacity(0.25), lineWidth: isCurrent ? 2 : 0.5))
         .opacity(item.decision == .reject ? 0.55 : 1)
+        .onAppear {
+            model.ensureCachedImage(for: item, variant: .thumbnail)
+        }
+    }
+
+    @ViewBuilder
+    private var tileImage: some View {
+        if let url = model.cachedImageURL(for: item, variant: .thumbnail),
+           let image = NSImage(contentsOf: url) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 32, height: 22)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+        } else {
+            Image(systemName: item.kind == .photo ? "photo" : "video")
+        }
     }
 
     private var decisionMarker: some View {

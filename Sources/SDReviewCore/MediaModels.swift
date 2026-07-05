@@ -193,6 +193,7 @@ public struct MediaProblem: Codable, Equatable, Identifiable, Sendable {
 
 public struct ScanResult: Codable, Equatable, Sendable {
     public var sourceRoot: String
+    public var cardFingerprint: String?
     public var items: [MediaItem]
     public var rawFiles: [String]
     public var heifFiles: [String]
@@ -200,12 +201,14 @@ public struct ScanResult: Codable, Equatable, Sendable {
 
     public init(
         sourceRoot: String,
+        cardFingerprint: String? = nil,
         items: [MediaItem],
         rawFiles: [String] = [],
         heifFiles: [String] = [],
         problems: [MediaProblem] = []
     ) {
         self.sourceRoot = sourceRoot
+        self.cardFingerprint = cardFingerprint
         self.items = items
         self.rawFiles = rawFiles
         self.heifFiles = heifFiles
@@ -230,6 +233,7 @@ public struct DateRange: Codable, Equatable, Sendable {
 public struct SessionDocument: Codable, Equatable, Sendable {
     public var toolVersion: String
     public var sourceRoot: String
+    public var cardFingerprint: String?
     public var dateRange: DateRange?
     public var lastItemID: String?
     public var filter: TimelineFilter
@@ -243,6 +247,7 @@ public struct SessionDocument: Codable, Equatable, Sendable {
     public init(
         toolVersion: String = sdReviewToolVersion,
         sourceRoot: String,
+        cardFingerprint: String? = nil,
         dateRange: DateRange? = nil,
         lastItemID: String? = nil,
         filter: TimelineFilter = .all,
@@ -255,6 +260,7 @@ public struct SessionDocument: Codable, Equatable, Sendable {
     ) {
         self.toolVersion = toolVersion
         self.sourceRoot = sourceRoot
+        self.cardFingerprint = cardFingerprint
         self.dateRange = dateRange
         self.lastItemID = lastItemID
         self.filter = filter
