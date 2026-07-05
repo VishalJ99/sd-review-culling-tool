@@ -48,8 +48,11 @@ public final class MediaPreviewCache {
     public func ensureCachedImage(for item: MediaItem, variant: CacheVariant) throws -> URL {
         let target = cachedURL(for: item, variant: variant)
         if FileManager.default.fileExists(atPath: target.path) {
-            touch(target)
-            return target
+            if isReadableJPEG(target) {
+                touch(target)
+                return target
+            }
+            try? FileManager.default.removeItem(at: target)
         }
 
         try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -113,8 +116,12 @@ public final class MediaPreviewCache {
     }
 
     private func writeJPEG(_ image: CGImage, destination: URL, quality: CGFloat) throws {
+        let temporary = destination
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).tmp")
+        try? FileManager.default.removeItem(at: temporary)
         guard let destinationRef = CGImageDestinationCreateWithURL(
-            destination as CFURL,
+            temporary as CFURL,
             UTType.jpeg.identifier as CFString,
             1,
             nil
@@ -123,8 +130,21 @@ public final class MediaPreviewCache {
         }
         CGImageDestinationAddImage(destinationRef, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
         guard CGImageDestinationFinalize(destinationRef) else {
+            try? FileManager.default.removeItem(at: temporary)
             throw MediaPreviewCacheError.cannotCreateDestination(destination)
         }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try FileManager.default.moveItem(at: temporary, to: destination)
+        }
+    }
+
+    private func isReadableJPEG(_ url: URL) -> Bool {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return false
+        }
+        return CGImageSourceGetCount(source) > 0
     }
 
     private func evictIfNeeded() throws {

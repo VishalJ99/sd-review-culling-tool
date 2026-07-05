@@ -135,11 +135,31 @@ private struct StatusBar: View {
         HStack(spacing: 14) {
             Text("\(session?.currentPosition ?? 0) / \(session?.filteredItems.count ?? 0)")
                 .fontWeight(.medium)
-            Text(session?.filter.label.lowercased() ?? "all")
+            Picker("Filter", selection: Binding(
+                get: { session?.filter ?? .all },
+                set: { value in
+                    model.setFilter(value)
+                }
+            )) {
+                ForEach(TimelineFilter.allCases, id: \.self) { filter in
+                    Text(filter.label).tag(filter)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 112)
             if let item {
                 Text(item.captureDate.formatted(date: .abbreviated, time: .shortened))
                 Text(item.filename)
                     .font(.system(.body, design: .monospaced))
+            }
+            if let resume = model.resumeMessage {
+                Text(resume)
+                    .foregroundStyle(.blue)
+            }
+            if model.sourceUnavailable, let error = model.errorMessage {
+                Text(error)
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
             }
             if let warning = model.warningSummary {
                 Button(warning) { model.showingProblems = true }
@@ -152,6 +172,8 @@ private struct StatusBar: View {
             StateBadge(decision: item?.decision ?? .undecided, crop: item?.crop != nil, segments: item?.segments.count ?? 0)
             Button(model.isGridView ? "Viewer" : "Grid") { model.toggleGridView() }
                 .keyboardShortcut("g", modifiers: [])
+            Button("Reset") { model.resetSession() }
+                .disabled(model.document == nil)
             Button("Export") { model.prepareExport() }
                 .keyboardShortcut("e", modifiers: .command)
                 .disabled(!model.canExport)
@@ -219,6 +241,12 @@ private struct PhotoReviewPane: View {
                     .scaleEffect(model.isZoomed ? 1.9 : 1.0)
                     .animation(.easeOut(duration: 0.12), value: model.isZoomed)
                     .padding(model.isZoomed ? 0 : 20)
+                    .onAppear {
+                        model.setCurrentPhotoAspect(width: image.size.width, height: image.size.height)
+                    }
+                    .onChange(of: item.id) { _, _ in
+                        model.setCurrentPhotoAspect(width: image.size.width, height: image.size.height)
+                    }
             } else {
                 ProgressView()
                     .onAppear {
@@ -227,7 +255,10 @@ private struct PhotoReviewPane: View {
             }
 
             if model.isCropMode {
-                CropOverlay(model: model)
+                if let previewURL = model.cachedImageURL(for: item, variant: .preview),
+                   let image = NSImage(contentsOf: previewURL) {
+                    CropOverlay(model: model, imageSize: image.size)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -236,11 +267,13 @@ private struct PhotoReviewPane: View {
 
 private struct CropOverlay: View {
     @ObservedObject var model: AppModel
+    var imageSize: CGSize
     @State private var dragStart: NormalizedCropRect?
 
     var body: some View {
         GeometryReader { proxy in
-            let rect = displayRect(in: proxy.size)
+            let imageRect = fittedImageRect(in: proxy.size)
+            let rect = displayRect(in: imageRect)
             ZStack(alignment: .topLeading) {
                 Color.black.opacity(0.22)
                 cropPath(rect: rect)
@@ -249,7 +282,7 @@ private struct CropOverlay: View {
                     .path(in: rect)
                     .stroke(Color.white, lineWidth: 1.4)
                 RuleOfThirds(rect: rect)
-                handles(rect: rect, canvasSize: proxy.size)
+                handles(rect: rect, imageRect: imageRect)
             }
             .gesture(
                 DragGesture()
@@ -257,8 +290,8 @@ private struct CropOverlay: View {
                         if dragStart == nil { dragStart = model.draftCrop }
                         guard var start = dragStart else { return }
                         start.move(
-                            dx: value.translation.width / max(proxy.size.width, 1),
-                            dy: value.translation.height / max(proxy.size.height, 1)
+                            dx: value.translation.width / max(imageRect.width, 1),
+                            dy: value.translation.height / max(imageRect.height, 1)
                         )
                         model.draftCrop = start
                         model.revision += 1
@@ -275,12 +308,28 @@ private struct CropOverlay: View {
         }
     }
 
-    private func displayRect(in size: CGSize) -> CGRect {
+    private func fittedImageRect(in size: CGSize) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0, size.width > 0, size.height > 0 else {
+            return CGRect(origin: .zero, size: size)
+        }
+        let padding: CGFloat = model.isZoomed ? 0 : 20
+        let available = CGSize(width: max(size.width - padding * 2, 1), height: max(size.height - padding * 2, 1))
+        let scale = min(available.width / imageSize.width, available.height / imageSize.height)
+        let fitted = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        return CGRect(
+            x: (size.width - fitted.width) / 2,
+            y: (size.height - fitted.height) / 2,
+            width: fitted.width,
+            height: fitted.height
+        )
+    }
+
+    private func displayRect(in imageRect: CGRect) -> CGRect {
         CGRect(
-            x: size.width * model.draftCrop.x,
-            y: size.height * model.draftCrop.y,
-            width: size.width * model.draftCrop.width,
-            height: size.height * model.draftCrop.height
+            x: imageRect.minX + imageRect.width * model.draftCrop.x,
+            y: imageRect.minY + imageRect.height * model.draftCrop.y,
+            width: imageRect.width * model.draftCrop.width,
+            height: imageRect.height * model.draftCrop.height
         )
     }
 
@@ -290,10 +339,10 @@ private struct CropOverlay: View {
         return path
     }
 
-    private func handles(rect: CGRect, canvasSize: CGSize) -> some View {
+    private func handles(rect: CGRect, imageRect: CGRect) -> some View {
         ZStack {
             ForEach(CropHandleKind.allCases, id: \.self) { kind in
-                CropResizeHandle(model: model, kind: kind, canvasSize: canvasSize)
+                CropResizeHandle(model: model, kind: kind, imageSize: imageRect.size)
                     .position(kind.point(in: rect))
             }
         }
@@ -355,7 +404,7 @@ private enum CropHandleKind: CaseIterable {
 private struct CropResizeHandle: View {
     @ObservedObject var model: AppModel
     var kind: CropHandleKind
-    var canvasSize: CGSize
+    var imageSize: CGSize
     @State private var dragStart: NormalizedCropRect?
 
     var body: some View {
@@ -380,8 +429,8 @@ private struct CropResizeHandle: View {
     }
 
     private func resizedCrop(from start: NormalizedCropRect, translation: CGSize) -> NormalizedCropRect {
-        let dx = Double(translation.width / max(canvasSize.width, 1))
-        let dy = Double(translation.height / max(canvasSize.height, 1))
+        let dx = Double(translation.width / max(imageSize.width, 1))
+        let dy = Double(translation.height / max(imageSize.height, 1))
         let minSize = 0.02
         var crop = start
 

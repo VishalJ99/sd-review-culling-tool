@@ -17,6 +17,12 @@ public struct ExportOptions: Sendable {
     }
 }
 
+public struct ExportedOutputFile: Codable, Equatable, Sendable {
+    public var filename: String
+    public var sizeBytes: Int64
+    public var sha256: String
+}
+
 public struct ExportedManifestItem: Codable, Equatable, Sendable {
     public var sourceRelativePath: String
     public var fileSize: Int64
@@ -26,6 +32,7 @@ public struct ExportedManifestItem: Codable, Equatable, Sendable {
     public var segments: [VideoSegment]
     public var cutMode: String?
     public var outputFilenames: [String]
+    public var outputFiles: [ExportedOutputFile]?
     public var failure: String?
 }
 
@@ -113,7 +120,9 @@ public final class MediaExporter {
             try FileManager.default.createDirectory(at: options.destination.appendingPathComponent("media"), withIntermediateDirectories: true)
         }
 
-        var outputMap: [String: [String]] = [:]
+        let manifestURL = options.destination.appendingPathComponent("manifest.json")
+        let previousManifest = loadManifest(from: manifestURL)
+        var outputMap: [String: [ExportedOutputFile]] = [:]
         var failureMap: [String: String] = [:]
         var failures: [String] = []
         var usedNames: Set<String> = []
@@ -127,8 +136,12 @@ public final class MediaExporter {
 
         for item in keptItems {
             do {
-                let outputs = try await export(item: item, options: options, usedNames: &usedNames)
-                outputMap[item.id] = outputs.map { $0.lastPathComponent }
+                outputMap[item.id] = try await export(
+                    item: item,
+                    options: options,
+                    previousManifest: previousManifest,
+                    usedNames: &usedNames
+                )
             } catch {
                 let failure = "\(item.relativePath): \(error.localizedDescription)"
                 failures.append(failure)
@@ -144,15 +157,17 @@ public final class MediaExporter {
         }
 
         let manifestItems = document.items.map { item in
-            ExportedManifestItem(
+            let outputs = outputMap[item.id] ?? []
+            return ExportedManifestItem(
                 sourceRelativePath: item.relativePath,
                 fileSize: item.fileSize,
                 sha256: (try? sha256File(item.fileURL)) ?? "",
                 decision: item.decision,
                 crop: item.crop,
                 segments: item.segments,
-                cutMode: item.kind == .video && !item.segments.isEmpty ? "passthrough-with-handles" : nil,
-                outputFilenames: outputMap[item.id] ?? [],
+                cutMode: cutMode(for: item),
+                outputFilenames: outputs.map(\.filename),
+                outputFiles: outputs,
                 failure: failureMap[item.id]
             )
         }
@@ -164,41 +179,48 @@ public final class MediaExporter {
             items: manifestItems,
             failures: failures
         )
-        try writeManifest(manifest, to: options.destination.appendingPathComponent("manifest.json"))
+        try writeManifest(manifest, to: manifestURL)
         return ExportReport(manifest: manifest, destination: options.destination)
     }
 
-    private func export(item: MediaItem, options: ExportOptions, usedNames: inout Set<String>) async throws -> [URL] {
+    private func export(
+        item: MediaItem,
+        options: ExportOptions,
+        previousManifest: ExportManifest?,
+        usedNames: inout Set<String>
+    ) async throws -> [ExportedOutputFile] {
+        if let previousOutputs = verifiedPreviousOutputs(for: item, options: options, previousManifest: previousManifest) {
+            previousOutputs.forEach { usedNames.insert($0.filename) }
+            return previousOutputs
+        }
+
         switch item.kind {
         case .photo:
             let name = uniqueName(baseName(for: item, suffix: "jpg"), usedNames: &usedNames)
             let target = folder(for: item, options: options).appendingPathComponent(name)
             if item.crop == nil {
-                try copyIfNeeded(source: item.fileURL, destination: target)
+                return [try copyIfNeeded(source: item.fileURL, destination: target)]
             } else {
-                try exportCroppedPhoto(item: item, destination: target)
+                return [try exportCroppedPhoto(item: item, destination: target)]
             }
-            return [target]
         case .video:
             if item.segments.isEmpty {
                 let name = uniqueName(baseName(for: item, suffix: "mov"), usedNames: &usedNames)
                 let target = folder(for: item, options: options).appendingPathComponent(name)
-                try copyIfNeeded(source: item.fileURL, destination: target)
-                return [target]
+                return [try copyIfNeeded(source: item.fileURL, destination: target)]
             }
 
-            var outputs: [URL] = []
+            var outputs: [ExportedOutputFile] = []
             let duration = videoDurationSeconds(url: item.fileURL)
             for (index, segment) in item.segments.sorted(by: { $0.startSeconds < $1.startSeconds }).enumerated() {
                 let name = uniqueName(baseName(for: item, clipIndex: index + 1, suffix: "mov"), usedNames: &usedNames)
                 let target = folder(for: item, options: options).appendingPathComponent(name)
-                try await exportVideoSegment(
+                outputs.append(try await exportVideoSegment(
                     source: item.fileURL,
                     destination: target,
                     start: max(0, segment.startSeconds - options.videoHandleSeconds),
                     end: min(duration, segment.endSeconds + options.videoHandleSeconds)
-                )
-                outputs.append(target)
+                ))
             }
             return outputs
         }
@@ -242,20 +264,22 @@ public final class MediaExporter {
         }
     }
 
-    private func copyIfNeeded(source: URL, destination: URL) throws {
+    private func copyIfNeeded(source: URL, destination: URL) throws -> ExportedOutputFile {
         if FileManager.default.fileExists(atPath: destination.path),
            let sourceSize = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize,
            let destinationSize = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-           sourceSize == destinationSize {
-            return
+           sourceSize == destinationSize,
+           (try? sha256File(destination)) == (try? sha256File(source)) {
+            return try outputFile(at: destination)
         }
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        try FileManager.default.copyItem(at: source, to: destination)
+        let temporary = temporaryURL(for: destination)
+        try? FileManager.default.removeItem(at: temporary)
+        try FileManager.default.copyItem(at: source, to: temporary)
+        try replaceFile(at: destination, with: temporary)
+        return try outputFile(at: destination)
     }
 
-    private func exportCroppedPhoto(item: MediaItem, destination: URL) throws {
+    private func exportCroppedPhoto(item: MediaItem, destination: URL) throws -> ExportedOutputFile {
         guard let crop = item.crop,
               let source = CGImageSourceCreateWithURL(item.fileURL as CFURL, nil) else {
             throw ExportError.cannotReadImage(item.fileURL)
@@ -282,8 +306,10 @@ public final class MediaExporter {
             throw ExportError.cannotReadImage(item.fileURL)
         }
 
+        let temporary = temporaryURL(for: destination)
+        try? FileManager.default.removeItem(at: temporary)
         guard let destinationRef = CGImageDestinationCreateWithURL(
-            destination as CFURL,
+            temporary as CFURL,
             UTType.jpeg.identifier as CFString,
             1,
             nil
@@ -301,19 +327,21 @@ public final class MediaExporter {
         ]
         CGImageDestinationAddImage(destinationRef, cropped, options as CFDictionary)
         guard CGImageDestinationFinalize(destinationRef) else {
+            try? FileManager.default.removeItem(at: temporary)
             throw ExportError.cannotCreateDestination(destination)
         }
+        try replaceFile(at: destination, with: temporary)
+        return try outputFile(at: destination)
     }
 
-    private func exportVideoSegment(source: URL, destination: URL, start: Double, end: Double) async throws {
+    private func exportVideoSegment(source: URL, destination: URL, start: Double, end: Double) async throws -> ExportedOutputFile {
         let asset = AVURLAsset(url: source)
         guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
             throw ExportError.videoExporterUnavailable(source)
         }
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        session.outputURL = destination
+        let temporary = temporaryURL(for: destination)
+        try? FileManager.default.removeItem(at: temporary)
+        session.outputURL = temporary
         session.outputFileType = .mov
         let startTime = CMTime(seconds: start, preferredTimescale: 600)
         let endTime = CMTime(seconds: max(start, end), preferredTimescale: 600)
@@ -326,7 +354,65 @@ public final class MediaExporter {
         }
 
         if session.status != .completed {
+            try? FileManager.default.removeItem(at: temporary)
             throw ExportError.videoExportFailed(source, session.error?.localizedDescription ?? "unknown error")
+        }
+        try replaceFile(at: destination, with: temporary)
+        return try outputFile(at: destination)
+    }
+
+    private func verifiedPreviousOutputs(
+        for item: MediaItem,
+        options: ExportOptions,
+        previousManifest: ExportManifest?
+    ) -> [ExportedOutputFile]? {
+        guard let previous = previousManifest?.items.first(where: { $0.sourceRelativePath == item.relativePath }),
+              previous.fileSize == item.fileSize,
+              previous.decision == item.decision,
+              previous.crop == item.crop,
+              previous.segments == item.segments,
+              previous.cutMode == cutMode(for: item),
+              let outputs = previous.outputFiles,
+              !outputs.isEmpty else {
+            return nil
+        }
+
+        let outputFolder = folder(for: item, options: options)
+        for output in outputs {
+            let url = outputFolder.appendingPathComponent(output.filename)
+            guard FileManager.default.fileExists(atPath: url.path),
+                  let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                  Int64(size) == output.sizeBytes,
+                  (try? sha256File(url)) == output.sha256 else {
+                return nil
+            }
+        }
+        return outputs
+    }
+
+    private func cutMode(for item: MediaItem) -> String? {
+        item.kind == .video && !item.segments.isEmpty ? "passthrough-with-handles" : nil
+    }
+
+    private func outputFile(at url: URL) throws -> ExportedOutputFile {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        return ExportedOutputFile(
+            filename: url.lastPathComponent,
+            sizeBytes: Int64(values.fileSize ?? 0),
+            sha256: try sha256File(url)
+        )
+    }
+
+    private func temporaryURL(for destination: URL) -> URL {
+        destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).tmp")
+    }
+
+    private func replaceFile(at destination: URL, with temporary: URL) throws {
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try FileManager.default.moveItem(at: temporary, to: destination)
         }
     }
 
@@ -354,6 +440,16 @@ public final class MediaExporter {
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(manifest)
         try data.write(to: url, options: [.atomic])
+    }
+
+    private func loadManifest(from url: URL) -> ExportManifest? {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(ExportManifest.self, from: data)
     }
 
     private func validateDestination(_ destination: URL, document: SessionDocument) throws {

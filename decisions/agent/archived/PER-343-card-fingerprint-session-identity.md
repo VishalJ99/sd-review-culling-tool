@@ -19,8 +19,9 @@ writing to the source.
 Moving a copied fixture to a different path still changes the fingerprint
 because the root path remains part of the digest. This avoids accidental
 collisions between unrelated local copies at the cost of not treating moved
-fixtures as the same card. The path component can be removed later if the user
-wants resume behavior to follow moved copies.
+fixtures as the same card. If card contents change enough to alter the
+fingerprint, session loading falls back to the latest session with the same
+source root and date range.
 
 ## Evidence
 

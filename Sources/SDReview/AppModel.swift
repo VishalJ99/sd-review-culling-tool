@@ -28,6 +28,7 @@ final class AppModel: ObservableObject {
     @Published var selectedSegmentID: UUID?
     @Published var isCropMode = false
     @Published var draftCrop = NormalizedCropRect(x: 0.12, y: 0.18, width: 0.76, height: 0.54, aspect: .sixteenNine)
+    @Published var currentPhotoAspect: Double?
     @Published var isZoomed = false
     @Published var showingExport = false
     @Published var exportDestination: URL = AppModel.defaultExportDestination()
@@ -42,6 +43,9 @@ final class AppModel: ObservableObject {
     @Published var showingProblems = false
     @Published var showingSettings = false
     @Published var isGridView = false
+    @Published var sourceUnavailable = false
+    @Published var resumeMessage: String?
+    @Published var currentVideoFrameDuration = 1.0 / 30.0
     @Published var videoTimeOffsetHours: Double = AppModel.defaultDouble(key: "videoTimeOffsetHours", defaultValue: 0) {
         didSet { UserDefaults.standard.set(videoTimeOffsetHours, forKey: AppModel.defaultsKey("videoTimeOffsetHours")) }
     }
@@ -194,6 +198,8 @@ final class AppModel: ObservableObject {
                 )
                 let document = loaded.map { merge(fresh: freshDocument, loaded: $0) } ?? freshDocument
                 reviewSession = ReviewSession(document: document)
+                resumeMessage = loaded == nil ? nil : "Resumed saved session."
+                sourceUnavailable = false
                 configurePreviewCache(for: document)
                 revision += 1
                 warmCacheAroundCurrent()
@@ -211,6 +217,8 @@ final class AppModel: ObservableObject {
             try sessionStore.reset(sourceRoot: document.sourceRoot, dateRange: document.dateRange, cardFingerprint: document.cardFingerprint)
             reviewSession = nil
             previewCache = nil
+            resumeMessage = nil
+            sourceUnavailable = false
             revision += 1
         } catch {
             errorMessage = error.localizedDescription
@@ -227,6 +235,7 @@ final class AppModel: ObservableObject {
 
     func tickPlayback() {
         currentPlaybackSeconds = player?.currentTime().seconds ?? 0
+        verifySourceAvailability()
     }
 
     func moveNext() {
@@ -286,6 +295,12 @@ final class AppModel: ObservableObject {
         afterSessionChange(autoplay: true)
     }
 
+    func setFilter(_ filter: TimelineFilter) {
+        guard let session = reviewSession else { return }
+        session.filter = filter
+        afterSessionChange(autoplay: true)
+    }
+
     func undo() {
         reviewSession?.undo()
         afterSessionChange(autoplay: false)
@@ -322,7 +337,8 @@ final class AppModel: ObservableObject {
 
     func setCropAspect(_ aspect: CropAspect) {
         draftCrop.aspect = aspect
-        if let ratio = aspect.ratio {
+        let ratio = aspect == .original ? currentPhotoAspect : aspect.ratio
+        if let ratio {
             let centerX = draftCrop.x + draftCrop.width / 2
             let centerY = draftCrop.y + draftCrop.height / 2
             var width = draftCrop.width
@@ -347,6 +363,11 @@ final class AppModel: ObservableObject {
         draftCrop.height = rect.height
         draftCrop.clamp()
         revision += 1
+    }
+
+    func setCurrentPhotoAspect(width: CGFloat, height: CGFloat) {
+        guard width > 0, height > 0 else { return }
+        currentPhotoAspect = Double(width / height)
     }
 
     func togglePlay() {
@@ -378,7 +399,7 @@ final class AppModel: ObservableObject {
     }
 
     func stepFrame(delta: Int) {
-        jump(seconds: Double(delta) / 30.0)
+        jump(seconds: Double(delta) * currentVideoFrameDuration)
     }
 
     func markIn() {
@@ -644,6 +665,7 @@ final class AppModel: ObservableObject {
             player?.pause()
             player = nil
             currentPlaybackSeconds = 0
+            currentVideoFrameDuration = 1.0 / 30.0
             return
         }
         let nextPlayer = AVPlayer(url: item.fileURL)
@@ -651,8 +673,36 @@ final class AppModel: ObservableObject {
         nextPlayer.actionAtItemEnd = .pause
         player = nextPlayer
         currentPlaybackSeconds = 0
+        currentVideoFrameDuration = frameDurationSeconds(for: item.fileURL)
         if autoplay {
             nextPlayer.playImmediately(atRate: playbackRate)
+        }
+    }
+
+    private func frameDurationSeconds(for url: URL) -> Double {
+        let asset = AVURLAsset(url: url)
+        guard let track = asset.tracks(withMediaType: .video).first,
+              track.nominalFrameRate > 0 else {
+            return 1.0 / 30.0
+        }
+        return 1.0 / Double(track.nominalFrameRate)
+    }
+
+    private func verifySourceAvailability() {
+        guard let document else { return }
+        let available = FileManager.default.fileExists(atPath: document.sourceRoot)
+        if available {
+            if sourceUnavailable {
+                sourceUnavailable = false
+                errorMessage = nil
+            }
+            return
+        }
+
+        if !sourceUnavailable {
+            player?.pause()
+            sourceUnavailable = true
+            errorMessage = "Source media is unavailable. Reinsert or reconnect the card/copy, then rescan or continue when the path is available."
         }
     }
 

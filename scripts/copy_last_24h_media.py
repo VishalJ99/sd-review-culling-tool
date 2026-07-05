@@ -56,6 +56,39 @@ def existing_hashes(destination: Path) -> dict[str, dict[str, object]]:
     return existing
 
 
+def nearest_existing_parent(path: Path) -> Path:
+    candidate = path
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    return candidate
+
+
+def path_contains(parent: Path, child: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def validate_destination(source: Path, destination: Path) -> None:
+    if source == destination or path_contains(source, destination):
+        raise ValueError(f"destination must not be inside the source tree: {destination}")
+    if path_contains(destination, source):
+        raise ValueError(f"source must not be inside the destination tree: {source}")
+
+    parent = nearest_existing_parent(destination)
+    if str(source).startswith("/Volumes/") and parent.exists():
+        try:
+            if source.stat().st_dev == parent.stat().st_dev:
+                raise ValueError(
+                    "destination must not be on the same mounted volume as the source card: "
+                    f"{destination}"
+                )
+        except OSError:
+            pass
+
+
 def recent_media_files(source: Path, hours: float) -> list[Path]:
     cutoff = datetime.now(tz=timezone.utc).timestamp() - (hours * 3600)
     files: list[Path] = []
@@ -72,6 +105,32 @@ def recent_media_files(source: Path, hours: float) -> list[Path]:
             except OSError:
                 continue
     return sorted(files, key=lambda item: str(item.relative_to(source)).lower())
+
+
+def remove_stale_media(destination: Path, expected_relative_paths: set[Path]) -> list[str]:
+    dcim = destination / "DCIM"
+    if not dcim.exists():
+        return []
+
+    removed: list[str] = []
+    for root, _, names in os.walk(dcim):
+        for name in names:
+            path = Path(root) / name
+            if path.suffix.lower() not in MEDIA_EXTENSIONS:
+                continue
+            relative = path.relative_to(destination)
+            if relative not in expected_relative_paths:
+                path.unlink()
+                removed.append(str(relative))
+
+    for root, dirs, _ in os.walk(dcim, topdown=False):
+        for dirname in dirs:
+            candidate = Path(root) / dirname
+            try:
+                candidate.rmdir()
+            except OSError:
+                pass
+    return sorted(removed)
 
 
 def write_reproduction(
@@ -119,6 +178,11 @@ def main() -> int:
     if not source.exists() or not source.is_dir():
         print(f"source directory does not exist: {source}", file=sys.stderr)
         return 2
+    try:
+        validate_destination(source, destination)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 4
 
     files = recent_media_files(source, args.hours)
     if not files and not args.allow_empty:
@@ -126,6 +190,8 @@ def main() -> int:
         return 3
 
     destination.mkdir(parents=True, exist_ok=True)
+    expected_relative_paths = {Path("DCIM") / path.relative_to(source) for path in files}
+    removed_stale = remove_stale_media(destination, expected_relative_paths)
 
     previous_hashes = existing_hashes(destination)
     manifest: list[CopiedFile] = []
@@ -171,6 +237,7 @@ def main() -> int:
         "hours": args.hours,
         "created_at": datetime.now(tz=timezone.utc).isoformat(),
         "file_count": len(manifest),
+        "removed_stale_files": removed_stale,
         "total_bytes": sum(item.size_bytes for item in manifest),
         "files": [asdict(item) for item in manifest],
     }

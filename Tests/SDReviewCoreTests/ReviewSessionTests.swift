@@ -120,4 +120,29 @@ final class ReviewSessionTests: XCTestCase {
 
         XCTAssertEqual(restored.document.items[0].decision, .undecided)
     }
+
+    func testSessionStoreFallsBackWhenCardFingerprintChangesAndResetClearsMatches() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let sourceRoot = "/tmp/card/DCIM"
+        let range = DateRange(start: Date(timeIntervalSince1970: 10), end: Date(timeIntervalSince1970: 20))
+        let document = SessionDocument(
+            sourceRoot: sourceRoot,
+            cardFingerprint: "old-fingerprint",
+            dateRange: range,
+            items: [
+                MediaItem(sourceRoot: sourceRoot, relativePath: "100_FUJI/DSCF0001.JPG", filename: "DSCF0001.JPG", kind: .photo, captureDate: Date(), fileSize: 1, decision: .keep)
+            ]
+        )
+        let store = SessionStore(directory: directory)
+        try store.save(document, dateRange: range)
+
+        let loaded = try XCTUnwrap(store.load(sourceRoot: sourceRoot, dateRange: range, cardFingerprint: "new-fingerprint"))
+        XCTAssertEqual(loaded.items.first?.decision, .keep)
+
+        try store.reset(sourceRoot: sourceRoot, dateRange: range, cardFingerprint: "new-fingerprint")
+        XCTAssertNil(try store.load(sourceRoot: sourceRoot, dateRange: range, cardFingerprint: "old-fingerprint"))
+    }
 }

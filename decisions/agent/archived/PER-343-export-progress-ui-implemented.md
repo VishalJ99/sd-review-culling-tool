@@ -17,6 +17,9 @@ retry behavior to be understandable.
 
 Per-file failures still do not abort the batch. They are collected in the GUI
 and in `manifest.json`, so a user can inspect failures and rerun the export.
+The manifest records output sizes and SHA-256 hashes; reruns verify existing
+outputs before skipping, and new or replacement outputs are written through temp
+files before replacing final paths.
 
 ## Evidence
 
