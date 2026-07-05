@@ -2,6 +2,18 @@ import XCTest
 @testable import SDReviewCore
 
 final class ExporterTests: XCTestCase {
+    actor ProgressRecorder {
+        private var values: [ExportProgress] = []
+
+        func append(_ value: ExportProgress) {
+            values.append(value)
+        }
+
+        func snapshot() -> [ExportProgress] {
+            values
+        }
+    }
+
     func testManifestIncludesRejectsAndUndecidedItems() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -65,5 +77,43 @@ final class ExporterTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testExporterReportsProgressAndCollectsPerFileFailures() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let source = root.appendingPathComponent("DCIM", isDirectory: true)
+        let folder = source.appendingPathComponent("100_FUJI", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let existingURL = folder.appendingPathComponent("DSCF0001.JPG")
+        try Data("keep".utf8).write(to: existingURL)
+
+        let now = Date()
+        let document = SessionDocument(
+            sourceRoot: source.path,
+            items: [
+                MediaItem(sourceRoot: source.path, relativePath: "100_FUJI/DSCF0001.JPG", filename: "DSCF0001.JPG", kind: .photo, captureDate: now, fileSize: 4, decision: .keep),
+                MediaItem(sourceRoot: source.path, relativePath: "100_FUJI/MISSING.JPG", filename: "MISSING.JPG", kind: .photo, captureDate: now, fileSize: 4, decision: .keep)
+            ]
+        )
+        let recorder = ProgressRecorder()
+
+        let report = try await MediaExporter().export(
+            document: document,
+            options: ExportOptions(destination: root.appendingPathComponent("export", isDirectory: true))
+        ) { progress in
+            await recorder.append(progress)
+        }
+
+        let progress = await recorder.snapshot()
+        XCTAssertEqual(progress.first?.completedItems, 0)
+        XCTAssertEqual(progress.last?.completedItems, 2)
+        XCTAssertEqual(progress.last?.totalItems, 2)
+        XCTAssertEqual(report.manifest.failures.count, 1)
+        XCTAssertEqual(report.manifest.items[0].outputFilenames.count, 1)
+        XCTAssertTrue(report.manifest.items[1].outputFilenames.isEmpty)
+        XCTAssertNotNil(report.manifest.items[1].failure)
     }
 }

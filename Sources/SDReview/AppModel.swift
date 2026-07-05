@@ -4,6 +4,11 @@ import Foundation
 import SDReviewCore
 import SwiftUI
 
+enum VideoSegmentEdge {
+    case start
+    case end
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var detectedSources: [URL] = []
@@ -30,6 +35,28 @@ final class AppModel: ObservableObject {
     @Published var isExporting = false
     @Published var exportMessage: String?
     @Published var cacheRevision = 0
+    @Published var exportCompletedItems = 0
+    @Published var exportTotalItems = 0
+    @Published var exportCurrentPath: String?
+    @Published var exportFailures: [String] = []
+    @Published var showingProblems = false
+    @Published var showingSettings = false
+    @Published var isGridView = false
+    @Published var videoTimeOffsetHours: Double = AppModel.defaultDouble(key: "videoTimeOffsetHours", defaultValue: 0) {
+        didSet { UserDefaults.standard.set(videoTimeOffsetHours, forKey: AppModel.defaultsKey("videoTimeOffsetHours")) }
+    }
+    @Published var videoHandleSeconds: Double = AppModel.defaultDouble(key: "videoHandleSeconds", defaultValue: 1) {
+        didSet { UserDefaults.standard.set(videoHandleSeconds, forKey: AppModel.defaultsKey("videoHandleSeconds")) }
+    }
+    @Published var cacheLimitGB: Double = AppModel.defaultDouble(key: "cacheLimitGB", defaultValue: 5) {
+        didSet {
+            UserDefaults.standard.set(cacheLimitGB, forKey: AppModel.defaultsKey("cacheLimitGB"))
+            if let document {
+                configurePreviewCache(for: document)
+                warmCacheAroundCurrent()
+            }
+        }
+    }
 
     private let scanner = MediaScanner()
     private let sessionStore = SessionStore()
@@ -79,6 +106,11 @@ final class AppModel: ObservableObject {
 
     var canExport: Bool {
         (document?.items.contains { $0.decision == .keep } ?? false) && !isExporting
+    }
+
+    var exportProgressFraction: Double {
+        guard exportTotalItems > 0 else { return 0 }
+        return Double(exportCompletedItems) / Double(exportTotalItems)
     }
 
     var estimatedExportBytes: Int64 {
@@ -142,11 +174,12 @@ final class AppModel: ObservableObject {
         errorMessage = nil
         exportMessage = nil
         let range = scanDateRange()
+        let videoOffsetSeconds = videoTimeOffsetHours * 3600
 
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try MediaScanner().scan(source: sourceURL, dateRange: range)
+                    try MediaScanner(videoTimeOffsetSeconds: videoOffsetSeconds).scan(source: sourceURL, dateRange: range)
                 }.value
 
                 let loaded = try sessionStore.load(sourceRoot: result.sourceRoot, dateRange: range, cardFingerprint: result.cardFingerprint)
@@ -211,6 +244,22 @@ final class AppModel: ObservableObject {
     func jump(to item: MediaItem) {
         reviewSession?.jumpToItem(id: item.id)
         afterSessionChange(autoplay: true)
+    }
+
+    func toggleGridView() {
+        isGridView.toggle()
+        revision += 1
+    }
+
+    func showRejectsForSkim() {
+        guard let session = reviewSession else { return }
+        showingExport = false
+        session.filter = .rejects
+        isGridView = true
+        revision += 1
+        persist()
+        configurePlayerForCurrentItem(autoplay: false)
+        warmCacheAroundCurrent()
     }
 
     func markKeep() {
@@ -392,6 +441,11 @@ final class AppModel: ObservableObject {
 
     func prepareExport() {
         exportDestination = Self.defaultExportDestination()
+        exportCompletedItems = 0
+        exportTotalItems = document?.items.filter { $0.isKeptForExport }.count ?? 0
+        exportCurrentPath = nil
+        exportFailures = []
+        exportMessage = nil
         showingExport = true
     }
 
@@ -399,16 +453,56 @@ final class AppModel: ObservableObject {
         guard let document else { return }
         isExporting = true
         exportMessage = nil
-        let options = ExportOptions(destination: exportDestination, flatMediaFolder: flatExport)
+        exportCompletedItems = 0
+        exportTotalItems = document.items.filter { $0.isKeptForExport }.count
+        exportCurrentPath = nil
+        exportFailures = []
+        let options = ExportOptions(
+            destination: exportDestination,
+            flatMediaFolder: flatExport,
+            videoHandleSeconds: videoHandleSeconds
+        )
         Task {
             do {
-                let report = try await exporter.export(document: document, options: options)
+                let report = try await exporter.export(document: document, options: options) { progress in
+                    await MainActor.run {
+                        self.exportCompletedItems = progress.completedItems
+                        self.exportTotalItems = progress.totalItems
+                        self.exportCurrentPath = progress.currentRelativePath
+                        self.exportFailures = progress.failures
+                    }
+                }
+                exportFailures = report.manifest.failures
                 exportMessage = "Exported \(report.manifest.items.reduce(0) { $0 + $1.outputFilenames.count }) files to \(report.destination.path)."
             } catch {
                 exportMessage = error.localizedDescription
             }
             isExporting = false
         }
+    }
+
+    func seekVideo(to seconds: Double) {
+        guard let player else { return }
+        let next = max(0, min(videoDurationSeconds, seconds))
+        player.seek(to: CMTime(seconds: next, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        currentPlaybackSeconds = next
+    }
+
+    func seekVideo(fraction: Double) {
+        seekVideo(to: min(max(fraction, 0), 1) * videoDurationSeconds)
+    }
+
+    func updateSegmentEdge(segmentID: UUID, edge: VideoSegmentEdge, seconds: Double) {
+        guard currentItem?.kind == .video else { return }
+        selectedSegmentID = segmentID
+        switch edge {
+        case .start:
+            reviewSession?.replaceSegment(segmentID: segmentID, start: seconds)
+        case .end:
+            reviewSession?.replaceSegment(segmentID: segmentID, end: seconds)
+        }
+        persist()
+        revision += 1
     }
 
     private func handle(event: NSEvent) -> Bool {
@@ -459,6 +553,8 @@ final class AppModel: ObservableObject {
             markReject()
         case "f":
             cycleFilter()
+        case "g":
+            toggleGridView()
         case " ":
             togglePlay()
         case "[":
@@ -565,7 +661,8 @@ final class AppModel: ObservableObject {
             previewCache = nil
             return
         }
-        previewCache = MediaPreviewCache(cardFingerprint: fingerprint)
+        let maxBytes = Int64(max(cacheLimitGB, 0.25) * 1024 * 1024 * 1024)
+        previewCache = MediaPreviewCache(cardFingerprint: fingerprint, maxBytes: maxBytes)
         cacheRevision += 1
     }
 
@@ -644,5 +741,17 @@ final class AppModel: ObservableObject {
         return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Pictures/SD Review", isDirectory: true)
             .appendingPathComponent(folder, isDirectory: true)
+    }
+
+    private static func defaultsKey(_ key: String) -> String {
+        "SDReview.\(key)"
+    }
+
+    private static func defaultDouble(key: String, defaultValue: Double) -> Double {
+        let key = defaultsKey(key)
+        guard UserDefaults.standard.object(forKey: key) != nil else {
+            return defaultValue
+        }
+        return UserDefaults.standard.double(forKey: key)
     }
 }

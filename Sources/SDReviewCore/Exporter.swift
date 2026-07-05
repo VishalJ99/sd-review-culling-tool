@@ -42,6 +42,20 @@ public struct ExportReport: Equatable, Sendable {
     public var destination: URL
 }
 
+public struct ExportProgress: Equatable, Sendable {
+    public var completedItems: Int
+    public var totalItems: Int
+    public var currentRelativePath: String?
+    public var failures: [String]
+
+    public init(completedItems: Int, totalItems: Int, currentRelativePath: String?, failures: [String]) {
+        self.completedItems = completedItems
+        self.totalItems = totalItems
+        self.currentRelativePath = currentRelativePath
+        self.failures = failures
+    }
+}
+
 public enum ExportError: Error, LocalizedError {
     case zeroKeepers
     case cannotReadImage(URL)
@@ -81,7 +95,11 @@ public final class MediaExporter {
             }
     }
 
-    public func export(document: SessionDocument, options: ExportOptions) async throws -> ExportReport {
+    public func export(
+        document: SessionDocument,
+        options: ExportOptions,
+        progress: (@Sendable (ExportProgress) async -> Void)? = nil
+    ) async throws -> ExportReport {
         let keptItems = document.items.filter { $0.isKeptForExport }
         guard !keptItems.isEmpty else { throw ExportError.zeroKeepers }
         try validateDestination(options.destination, document: document)
@@ -99,6 +117,13 @@ public final class MediaExporter {
         var failureMap: [String: String] = [:]
         var failures: [String] = []
         var usedNames: Set<String> = []
+        var completedItems = 0
+        await progress?(ExportProgress(
+            completedItems: completedItems,
+            totalItems: keptItems.count,
+            currentRelativePath: keptItems.first?.relativePath,
+            failures: failures
+        ))
 
         for item in keptItems {
             do {
@@ -109,6 +134,13 @@ public final class MediaExporter {
                 failures.append(failure)
                 failureMap[item.id] = error.localizedDescription
             }
+            completedItems += 1
+            await progress?(ExportProgress(
+                completedItems: completedItems,
+                totalItems: keptItems.count,
+                currentRelativePath: completedItems < keptItems.count ? keptItems[completedItems].relativePath : nil,
+                failures: failures
+            ))
         }
 
         let manifestItems = document.items.map { item in

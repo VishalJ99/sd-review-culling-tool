@@ -13,7 +13,11 @@ public enum MediaScannerError: Error, LocalizedError {
 }
 
 public final class MediaScanner {
-    public init() {}
+    private let videoTimeOffsetSeconds: Double
+
+    public init(videoTimeOffsetSeconds: Double = 0) {
+        self.videoTimeOffsetSeconds = videoTimeOffsetSeconds
+    }
 
     public func scan(source inputURL: URL, dateRange: DateRange? = nil) throws -> ScanResult {
         let sourceURL = inputURL.standardizedFileURL
@@ -61,7 +65,12 @@ public final class MediaScanner {
                 continue
             }
 
-            let captureDate = metadataDate ?? fallbackDate
+            let captureDate: Date
+            if kind == .video, let metadataDate {
+                captureDate = metadataDate.addingTimeInterval(videoTimeOffsetSeconds)
+            } else {
+                captureDate = metadataDate ?? fallbackDate
+            }
             if let dateRange, !dateRange.contains(captureDate) {
                 continue
             }
@@ -88,6 +97,7 @@ public final class MediaScanner {
             }
             return $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending
         }
+        problems.append(contentsOf: videoTimestampProblems(items: items))
 
         return ScanResult(
             sourceRoot: root.path,
@@ -215,5 +225,47 @@ public final class MediaScanner {
         formatter.timeZone = .current
         formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
         return formatter.date(from: value)
+    }
+
+    private func videoTimestampProblems(items: [MediaItem]) -> [MediaProblem] {
+        guard abs(videoTimeOffsetSeconds) < 0.1 else { return [] }
+        let timezoneOffset = Double(TimeZone.current.secondsFromGMT(for: Date()))
+        guard abs(timezoneOffset) >= 1800 else { return [] }
+        let photos = items.filter { $0.kind == .photo }
+        guard !photos.isEmpty else { return [] }
+
+        return items.compactMap { item in
+            guard item.kind == .video,
+                  let nearestPhoto = nearestPhotoByCameraNumber(to: item, photos: photos) else {
+                return nil
+            }
+            let delta = item.captureDate.timeIntervalSince(nearestPhoto.captureDate)
+            guard abs(abs(delta) - abs(timezoneOffset)) <= 15 * 60 else {
+                return nil
+            }
+            return MediaProblem(
+                relativePath: item.relativePath,
+                message: "Video timestamp is offset from a nearby photo by roughly the local time zone. If ordering looks wrong, set a video time offset in Settings."
+            )
+        }
+    }
+
+    private func nearestPhotoByCameraNumber(to video: MediaItem, photos: [MediaItem]) -> MediaItem? {
+        guard let videoNumber = cameraSequenceNumber(video.filename) else { return nil }
+        let candidates = photos.compactMap { photo -> (distance: Int, item: MediaItem)? in
+            guard let photoNumber = cameraSequenceNumber(photo.filename) else { return nil }
+            return (abs(photoNumber - videoNumber), photo)
+        }
+        guard let closest = candidates.min(by: { $0.distance < $1.distance }),
+              closest.distance <= 4 else {
+            return nil
+        }
+        return closest.item
+    }
+
+    private func cameraSequenceNumber(_ filename: String) -> Int? {
+        let stem = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+        let digits = stem.filter(\.isNumber)
+        return digits.isEmpty ? nil : Int(digits)
     }
 }
