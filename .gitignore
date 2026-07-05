@@ -1,0 +1,12 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserdata/
+*.xcuserstate
+
+# Local copied SD-card media and smoke-test exports.
+.local-test-data/
+
+# Temporary export destinations created while testing.
+Exports/
