@@ -768,19 +768,47 @@ private struct FilmstripView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        ScrollView(.horizontal) {
-            LazyHStack(spacing: 8) {
-                ForEach(model.filteredItems) { item in
-                    FilmstripTile(model: model, item: item, isCurrent: item.id == model.currentItem?.id)
-                        .onTapGesture {
-                            model.jump(to: item)
-                        }
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 8) {
+                    ForEach(model.filteredItems) { item in
+                        FilmstripTile(model: model, item: item, isCurrent: item.id == model.currentItem?.id)
+                            .id(item.id)
+                            .onTapGesture {
+                                model.jump(to: item)
+                            }
+                    }
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .onAppear {
+                scrollCurrentTile(proxy: proxy, animated: false)
+            }
+            .onChange(of: model.currentItem?.id) { _, _ in
+                scrollCurrentTile(proxy: proxy)
+            }
+            .onChange(of: model.filteredItems.map(\.id)) { _, _ in
+                scrollCurrentTile(proxy: proxy)
+            }
+            .frame(height: 80)
         }
-        .frame(height: 80)
+    }
+
+    private func scrollCurrentTile(proxy: ScrollViewProxy, animated: Bool = true) {
+        guard let id = model.currentItem?.id,
+              model.filteredItems.contains(where: { $0.id == id }) else {
+            return
+        }
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    proxy.scrollTo(id, anchor: .center)
+                }
+            } else {
+                proxy.scrollTo(id, anchor: .center)
+            }
+        }
     }
 }
 
