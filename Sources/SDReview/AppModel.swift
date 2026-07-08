@@ -35,6 +35,7 @@ final class AppModel: ObservableObject {
     @Published var exportDestination: URL = AppModel.defaultExportDestination()
     @Published var flatExport = false
     @Published var isExporting = false
+    @Published var isExportCancelling = false
     @Published var exportMessage: String?
     @Published var cacheRevision = 0
     @Published var exportCompletedItems = 0
@@ -72,6 +73,7 @@ final class AppModel: ObservableObject {
     private let actionLogger = ActionLogger()
     private var previewCache: MediaPreviewCache?
     private var cacheWarmTask: Task<Bool, Never>?
+    private var exportTask: Task<Void, Never>?
     private var keyboardMonitor: Any?
 
     init() {
@@ -84,6 +86,7 @@ final class AppModel: ObservableObject {
     }
 
     deinit {
+        exportTask?.cancel()
         if let keyboardMonitor {
             NSEvent.removeMonitor(keyboardMonitor)
         }
@@ -571,13 +574,15 @@ final class AppModel: ObservableObject {
         exportCurrentPath = nil
         exportFailures = []
         exportMessage = nil
+        isExportCancelling = false
         showingExport = true
         logAction("export.prepare", details: ["keepers": "\(exportTotalItems)"])
     }
 
     func runExport() {
-        guard let document else { return }
+        guard let document, !isExporting else { return }
         isExporting = true
+        isExportCancelling = false
         exportMessage = nil
         exportCompletedItems = 0
         exportTotalItems = document.items.filter { $0.isKeptForExport }.count
@@ -589,7 +594,7 @@ final class AppModel: ObservableObject {
             videoHandleSeconds: videoHandleSeconds
         )
         logAction("export.start", details: ["destination": exportDestination.path, "keepers": "\(exportTotalItems)"])
-        Task {
+        exportTask = Task {
             do {
                 let report = try await exporter.export(document: document, options: options) { progress in
                     await MainActor.run {
@@ -602,12 +607,30 @@ final class AppModel: ObservableObject {
                 exportFailures = report.manifest.failures
                 exportMessage = "Exported \(report.manifest.items.reduce(0) { $0 + $1.outputFilenames.count }) files to \(report.destination.path)."
                 logAction("export.complete", details: ["destination": report.destination.path, "failures": "\(report.manifest.failures.count)"])
+            } catch is CancellationError {
+                exportCurrentPath = nil
+                exportMessage = "Export canceled. Partial files remain at \(exportDestination.path). Re-run to this same folder to resume."
+                logAction("export.cancelled", details: ["destination": exportDestination.path])
             } catch {
                 exportMessage = error.localizedDescription
                 logAction("export.error", details: ["message": error.localizedDescription])
             }
             isExporting = false
+            isExportCancelling = false
+            exportTask = nil
         }
+    }
+
+    func cancelExport() {
+        guard isExporting else {
+            showingExport = false
+            return
+        }
+        guard !isExportCancelling else { return }
+        isExportCancelling = true
+        exportMessage = "Canceling after the current file..."
+        logAction("export.cancel.request", details: ["destination": exportDestination.path, "completed": "\(exportCompletedItems)", "total": "\(exportTotalItems)"])
+        exportTask?.cancel()
     }
 
     func seekVideo(to seconds: Double) {

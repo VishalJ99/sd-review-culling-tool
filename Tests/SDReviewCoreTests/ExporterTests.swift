@@ -201,4 +201,59 @@ final class ExporterTests: XCTestCase {
 
         XCTAssertEqual(try Data(contentsOf: outputURL), Data("bbbb".utf8))
     }
+
+    func testExporterStopsAfterCancellationBetweenItems() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let source = root.appendingPathComponent("DCIM", isDirectory: true)
+        let folder = source.appendingPathComponent("100_FUJI", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let captureDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let items = try (1...3).map { index in
+            let filename = "DSCF000\(index).JPG"
+            let url = folder.appendingPathComponent(filename)
+            try Data("keep-\(index)".utf8).write(to: url)
+            return MediaItem(
+                sourceRoot: source.path,
+                relativePath: "100_FUJI/\(filename)",
+                filename: filename,
+                kind: .photo,
+                captureDate: captureDate.addingTimeInterval(Double(index)),
+                fileSize: Int64(6 + String(index).count),
+                decision: .keep
+            )
+        }
+        let destination = root.appendingPathComponent("export", isDirectory: true)
+        let recorder = ProgressRecorder()
+
+        do {
+            _ = try await MediaExporter().export(
+                document: SessionDocument(sourceRoot: source.path, items: items),
+                options: ExportOptions(destination: destination)
+            ) { progress in
+                await recorder.append(progress)
+                if progress.completedItems == 1 {
+                    withUnsafeCurrentTask { task in
+                        task?.cancel()
+                    }
+                }
+            }
+            XCTFail("Expected cancellation to stop the export")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let progress = await recorder.snapshot()
+        XCTAssertTrue(progress.contains { $0.completedItems == 1 })
+        let photos = try FileManager.default.contentsOfDirectory(
+            at: destination.appendingPathComponent("photos", isDirectory: true),
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(photos.filter { $0.pathExtension == "jpg" }.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.appendingPathComponent("manifest.json").path))
+    }
 }

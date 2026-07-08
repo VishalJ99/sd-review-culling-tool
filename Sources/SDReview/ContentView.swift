@@ -949,9 +949,11 @@ private struct ExportSheet: View {
                         model.exportDestination = url
                     }
                 }
+                .disabled(model.isExporting)
             }
 
             Toggle("Flat media/ folder - one chronological list", isOn: $model.flatExport)
+                .disabled(model.isExporting)
 
             Text("Estimated \(byteCount(model.estimatedExportBytes))")
                 .foregroundStyle(.secondary)
@@ -999,8 +1001,11 @@ private struct ExportSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { model.showingExport = false }
-                    .disabled(model.isExporting)
+                Button(model.isExporting && model.isExportCancelling ? "Canceling" : "Cancel") {
+                    model.cancelExport()
+                }
+                .keyboardShortcut(.cancelAction)
+                .disabled(model.isExportCancelling)
                 Button(model.isExporting ? "Exporting" : "Export") {
                     model.runExport()
                 }

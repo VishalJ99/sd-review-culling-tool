@@ -63,6 +63,30 @@ public struct ExportProgress: Equatable, Sendable {
     }
 }
 
+private final class ExportCancellationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var session: AVAssetExportSession?
+
+    func set(_ session: AVAssetExportSession) {
+        lock.lock()
+        self.session = session
+        lock.unlock()
+    }
+
+    func clear() {
+        lock.lock()
+        session = nil
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        let session = session
+        lock.unlock()
+        session?.cancelExport()
+    }
+}
+
 public enum ExportError: Error, LocalizedError {
     case zeroKeepers
     case cannotReadImage(URL)
@@ -135,6 +159,7 @@ public final class MediaExporter {
         ))
 
         for item in keptItems {
+            try Task.checkCancellation()
             do {
                 outputMap[item.id] = try await export(
                     item: item,
@@ -142,6 +167,8 @@ public final class MediaExporter {
                     previousManifest: previousManifest,
                     usedNames: &usedNames
                 )
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 let failure = "\(item.relativePath): \(error.localizedDescription)"
                 failures.append(failure)
@@ -156,12 +183,15 @@ public final class MediaExporter {
             ))
         }
 
-        let manifestItems = document.items.map { item in
+        var manifestItems: [ExportedManifestItem] = []
+        for item in document.items {
+            try Task.checkCancellation()
             let outputs = outputMap[item.id] ?? []
-            return ExportedManifestItem(
+            let sha256 = try optionalSourceHash(item.fileURL)
+            manifestItems.append(ExportedManifestItem(
                 sourceRelativePath: item.relativePath,
                 fileSize: item.fileSize,
-                sha256: (try? sha256File(item.fileURL)) ?? "",
+                sha256: sha256,
                 decision: item.decision,
                 crop: item.crop,
                 segments: item.segments,
@@ -169,7 +199,7 @@ public final class MediaExporter {
                 outputFilenames: outputs.map(\.filename),
                 outputFiles: outputs,
                 failure: failureMap[item.id]
-            )
+            ))
         }
 
         let manifest = ExportManifest(
@@ -193,6 +223,7 @@ public final class MediaExporter {
             previousOutputs.forEach { usedNames.insert($0.filename) }
             return previousOutputs
         }
+        try Task.checkCancellation()
 
         switch item.kind {
         case .photo:
@@ -265,6 +296,7 @@ public final class MediaExporter {
     }
 
     private func copyIfNeeded(source: URL, destination: URL) throws -> ExportedOutputFile {
+        try Task.checkCancellation()
         if FileManager.default.fileExists(atPath: destination.path),
            let sourceSize = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize,
            let destinationSize = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize,
@@ -272,6 +304,7 @@ public final class MediaExporter {
            (try? sha256File(destination)) == (try? sha256File(source)) {
             return try outputFile(at: destination)
         }
+        try Task.checkCancellation()
         let temporary = temporaryURL(for: destination)
         try? FileManager.default.removeItem(at: temporary)
         try FileManager.default.copyItem(at: source, to: temporary)
@@ -280,6 +313,7 @@ public final class MediaExporter {
     }
 
     private func exportCroppedPhoto(item: MediaItem, destination: URL) throws -> ExportedOutputFile {
+        try Task.checkCancellation()
         guard let crop = item.crop,
               let source = CGImageSourceCreateWithURL(item.fileURL as CFURL, nil) else {
             throw ExportError.cannotReadImage(item.fileURL)
@@ -335,10 +369,15 @@ public final class MediaExporter {
     }
 
     private func exportVideoSegment(source: URL, destination: URL, start: Double, end: Double) async throws -> ExportedOutputFile {
+        try Task.checkCancellation()
         let asset = AVURLAsset(url: source)
         guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
             throw ExportError.videoExporterUnavailable(source)
         }
+        let cancellationBox = ExportCancellationBox()
+        cancellationBox.set(session)
+        defer { cancellationBox.clear() }
+
         let temporary = temporaryURL(for: destination)
         try? FileManager.default.removeItem(at: temporary)
         session.outputURL = temporary
@@ -347,12 +386,20 @@ public final class MediaExporter {
         let endTime = CMTime(seconds: max(start, end), preferredTimescale: 600)
         session.timeRange = CMTimeRangeFromTimeToTime(start: startTime, end: endTime)
 
-        await withCheckedContinuation { continuation in
-            session.exportAsynchronously {
-                continuation.resume()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                session.exportAsynchronously {
+                    continuation.resume()
+                }
             }
+        } onCancel: {
+            cancellationBox.cancel()
         }
 
+        if Task.isCancelled || session.status == .cancelled {
+            try? FileManager.default.removeItem(at: temporary)
+            throw CancellationError()
+        }
         if session.status != .completed {
             try? FileManager.default.removeItem(at: temporary)
             throw ExportError.videoExportFailed(source, session.error?.localizedDescription ?? "unknown error")
@@ -396,6 +443,7 @@ public final class MediaExporter {
     }
 
     private func outputFile(at url: URL) throws -> ExportedOutputFile {
+        try Task.checkCancellation()
         let values = try url.resourceValues(forKeys: [.fileSizeKey])
         return ExportedOutputFile(
             filename: url.lastPathComponent,
@@ -417,6 +465,16 @@ public final class MediaExporter {
         }
     }
 
+    private func optionalSourceHash(_ url: URL) throws -> String {
+        do {
+            return try sha256File(url)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return ""
+        }
+    }
+
     private func videoDurationSeconds(url: URL) -> Double {
         let asset = AVURLAsset(url: url)
         return asset.duration.seconds.isFinite ? asset.duration.seconds : 0
@@ -427,11 +485,13 @@ public final class MediaExporter {
         defer { try? handle.close() }
         var hasher = SHA256()
         while autoreleasepool(invoking: {
+            if Task.isCancelled { return false }
             let data = handle.readData(ofLength: 1024 * 1024)
             if data.isEmpty { return false }
             hasher.update(data: data)
             return true
         }) {}
+        try Task.checkCancellation()
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
