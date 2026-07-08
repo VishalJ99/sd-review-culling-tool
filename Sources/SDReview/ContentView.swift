@@ -298,26 +298,16 @@ private struct CropOverlay: View {
                 Color.black.opacity(0.22)
                 cropPath(rect: rect)
                     .fill(Color.black.opacity(0.01), style: FillStyle(eoFill: true))
+                    .allowsHitTesting(false)
+                cropMoveSurface(rect: rect, imageRect: imageRect)
                 Rectangle()
                     .path(in: rect)
                     .stroke(Color.white, lineWidth: 1.4)
+                    .allowsHitTesting(false)
                 RuleOfThirds(rect: rect)
+                    .allowsHitTesting(false)
                 handles(rect: rect, imageRect: imageRect)
             }
-            .gesture(
-                DragGesture()
-                    .onChanged { value in
-                        if dragStart == nil { dragStart = model.draftCrop }
-                        guard var start = dragStart else { return }
-                        start.move(
-                            dx: value.translation.width / max(imageRect.width, 1),
-                            dy: value.translation.height / max(imageRect.height, 1)
-                        )
-                        model.draftCrop = start
-                        model.revision += 1
-                    }
-                    .onEnded { _ in dragStart = nil }
-            )
             .overlay(alignment: .bottom) {
                 Text("1-5 aspect  |  arrows move  |  shift+arrows resize  |  return apply  |  esc cancel  |  R reset")
                     .font(.caption)
@@ -351,6 +341,28 @@ private struct CropOverlay: View {
             width: imageRect.width * model.draftCrop.width,
             height: imageRect.height * model.draftCrop.height
         )
+    }
+
+    private func cropMoveSurface(rect: CGRect, imageRect: CGRect) -> some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.001))
+            .frame(width: rect.width, height: rect.height)
+            .position(x: rect.midX, y: rect.midY)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if dragStart == nil { dragStart = model.draftCrop }
+                        guard var start = dragStart else { return }
+                        start.move(
+                            dx: value.translation.width / max(imageRect.width, 1),
+                            dy: value.translation.height / max(imageRect.height, 1)
+                        )
+                        model.draftCrop = start
+                        model.revision += 1
+                    }
+                    .onEnded { _ in dragStart = nil }
+            )
     }
 
     private func cropPath(rect: CGRect) -> Path {

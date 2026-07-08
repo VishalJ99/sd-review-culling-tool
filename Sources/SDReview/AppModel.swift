@@ -27,7 +27,7 @@ final class AppModel: ObservableObject {
     @Published var pendingOut: Double?
     @Published var selectedSegmentID: UUID?
     @Published var isCropMode = false
-    @Published var draftCrop = NormalizedCropRect(x: 0.12, y: 0.18, width: 0.76, height: 0.54, aspect: .sixteenNine)
+    @Published var draftCrop = AppModel.defaultDraftCrop()
     @Published var currentPhotoAspect: Double?
     @Published var isZoomed = false
     @Published var zoomAnchor = UnitPoint.center
@@ -400,7 +400,7 @@ final class AppModel: ObservableObject {
 
     func beginCropMode() {
         guard currentItem?.kind == .photo else { return }
-        draftCrop = currentItem?.crop ?? NormalizedCropRect(x: 0.12, y: 0.18, width: 0.76, height: 0.54, aspect: .sixteenNine)
+        draftCrop = currentItem?.crop ?? Self.defaultDraftCrop()
         isCropMode = true
         isZoomed = false
         logAction("crop.begin", item: currentItem)
@@ -977,6 +977,10 @@ final class AppModel: ObservableObject {
         return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Pictures/SD Review", isDirectory: true)
             .appendingPathComponent(folder, isDirectory: true)
+    }
+
+    private static func defaultDraftCrop() -> NormalizedCropRect {
+        NormalizedCropRect(x: 0.12, y: 0.12, width: 0.76, height: 0.76, aspect: .free)
     }
 
     private static func defaultsKey(_ key: String) -> String {
